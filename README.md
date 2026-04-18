@@ -3,6 +3,8 @@
 
 # Reader
 
+https://github.com/user-attachments/assets/cd115e77-e315-4e02-8a46-e008e47fdf17
+
 </div>
 
 A macOS markdown reader and WYSIWYG editor. One surface: the markdown source *is* the rendered view — syntax marks stay visible as quiet tertiary-ink, so copy and paste round-trip losslessly as markdown. No preview pane, no export step.
