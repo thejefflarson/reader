@@ -83,20 +83,10 @@ final class EditorTextView: NSTextView, NSTextStorageDelegate {
         ]
     }
 
-    // MARK: - Caret
-    //
     // macOS 14+ renders the caret via a separate `NSTextInsertionIndicator`
     // view, so overriding `drawInsertionPoint` produces a second cursor.
-    // We rely on `insertionPointColor` alone — the system caret is already
-    // a tuned, accessible affordance.
-
-    // MARK: - Placeholder
-    //
-    // A `var placeholder` is kept for API parity with the controller; it
-    // has no effect today. We avoid drawing into `draw(_:)` because any
-    // layout touch inside the text view's draw pass can escalate to an
-    // NSException if storage is ever mutated synchronously elsewhere.
-    var placeholder: String = ""
+    // `insertionPointColor` alone is sufficient — the system caret is a
+    // tuned, accessible affordance we don't improve by reimplementing.
 
     // MARK: - Styling
 
@@ -279,15 +269,19 @@ final class EditorTextView: NSTextView, NSTextStorageDelegate {
     }
 
     override func readSelection(from pboard: NSPasteboard) -> Bool {
-        // Prefer plain text — if it's markdown-shaped, it already is markdown.
+        // Prefer plain text — if the clipboard is markdown-shaped, it
+        // *is* markdown and we insert it verbatim. If only rich text is
+        // available, fall back to RTF via NSAttributedString's native
+        // reader and convert to markdown runs.
+        //
+        // Note: HTML paste (`NSAttributedString(html:)`) is *not* handled
+        // here. Its WebKit-backed parser fetches remote resources and
+        // carries the WebKit attack surface (see Docs/security.md §2).
+        // For HTML payloads the pasteboard almost always also contains a
+        // plain-text representation; we take that path and refuse to
+        // parse HTML.
         if let plain = pboard.string(forType: .string) {
             insertText(plain, replacementRange: selectedRange())
-            return true
-        }
-        // Fallback: convert rich content into markdown.
-        if let data = pboard.data(forType: .html),
-           let attr = NSAttributedString(html: data, documentAttributes: nil) {
-            insertText(MarkdownSerializer.markdown(from: attr), replacementRange: selectedRange())
             return true
         }
         if let data = pboard.data(forType: .rtf),

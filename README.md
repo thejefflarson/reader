@@ -58,3 +58,8 @@ gh release create v<version> build/Reader-<version>.zip \
 ```
 
 The EdDSA signing key lives in the macOS Keychain; the public half is in `Resources/Info.plist` (`SUPublicEDKey`). Sparkle will refuse any update that isn't signed by the matching private key.
+
+## Design docs
+
+- [Architecture Decision Records](Docs/adr/) — load-bearing decisions: single-surface WYSIWYG, regex styler vs AST, AppKit over SwiftUI, Sparkle for updates
+- [Security review](Docs/security.md) — threat model, findings, mitigations

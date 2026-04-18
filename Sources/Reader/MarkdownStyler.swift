@@ -3,94 +3,54 @@ import AppKit
 /// Applies markdown-aware typographic styling directly to an `NSTextStorage`
 /// without altering its characters. The markdown source remains the ground
 /// truth; attributes are layered on top so copy/paste round-trips losslessly.
+///
+/// Organisation:
+///   - Every markdown construct is a `Rule` — a regex + a closure that
+///     stamps attributes on its match.
+///   - Rules run in the order they're listed in `Self.allRules`. A rule
+///     marked `.occupies` (code spans, fenced blocks) forbids later rules
+///     from firing inside its range — "code" content is never re-interpreted.
+///   - Syntax markers (the literal `*`, `#`, backtick, brackets…) are
+///     stamped with `.isMarkdownSyntax = true`; preview mode deletes those
+///     ranges to produce a clean rendered view.
 final class MarkdownStyler {
-    private let fenced = try! NSRegularExpression(
-        pattern: "(^|\\n)(```[^\\n]*\\n[\\s\\S]*?\\n```)(?=\\n|$)",
-        options: []
-    )
-    private let indentedCode = try! NSRegularExpression(
-        pattern: "(?m)^(    |\\t)(.+)$",
-        options: []
-    )
-    private let inlineCode = try! NSRegularExpression(
-        pattern: "`([^`\\n]+)`",
-        options: []
-    )
-    private let heading = try! NSRegularExpression(
-        pattern: "(?m)^(#{1,6})(\\s+)([^\\n]+)$",
-        options: []
-    )
-    private let blockquote = try! NSRegularExpression(
-        pattern: "(?m)^(>\\s*)(.*)$",
-        options: []
-    )
-    private let listItem = try! NSRegularExpression(
-        pattern: "(?m)^(\\s*)([-*+]|\\d+\\.)(\\s+)(.+)$",
-        options: []
-    )
-    private let hr = try! NSRegularExpression(
-        pattern: "(?m)^(-{3,}|\\*{3,}|_{3,})\\s*$",
-        options: []
-    )
-    private let bold = try! NSRegularExpression(
-        pattern: "(\\*\\*|__)(?=\\S)(.+?)(?<=\\S)\\1",
-        options: [.dotMatchesLineSeparators]
-    )
-    // Italic must NOT match the `*...*` pieces of `**bold**`. Require the
-    // asterisk (or underscore) to have a non-marker, non-word boundary on
-    // each side, and forbid the marker character from appearing in the
-    // content. Stars and underscores each get their own pattern so the
-    // "no other marker in content" rule is unambiguous.
-    private let italicStar = try! NSRegularExpression(
-        pattern: "(?<![*\\w])\\*(?=\\S)([^*\\n]+?)(?<=\\S)\\*(?![*\\w])",
-        options: []
-    )
-    private let italicUnder = try! NSRegularExpression(
-        pattern: "(?<![_\\w])_(?=\\S)([^_\\n]+?)(?<=\\S)_(?![_\\w])",
-        options: []
-    )
-    private let strike = try! NSRegularExpression(
-        pattern: "~~(?=\\S)([^\\n]+?)(?<=\\S)~~",
-        options: []
-    )
-    private let link = try! NSRegularExpression(
-        pattern: "\\[([^\\]\\n]+)\\]\\(([^)\\n]+)\\)",
-        options: []
-    )
+    private let rules: [Rule]
+
+    init() {
+        rules = Self.allRules()
+    }
 
     func restyle(_ storage: NSTextStorage) {
-        let text = storage.string as NSString
-        let full = NSRange(location: 0, length: text.length)
+        let full = NSRange(location: 0, length: storage.length)
         guard full.length > 0 else { return }
 
         storage.setAttributes(baseAttributes(), range: full)
+        let occupied = NSMutableIndexSet()
+        let context = Context(storage: storage, occupied: occupied)
 
-        let codeRanges = NSMutableIndexSet()
-
-        applyFencedCode(in: storage, text: text, full: full, codeRanges: codeRanges)
-        applyIndentedCode(in: storage, text: text, full: full, codeRanges: codeRanges)
-        applyInlineCode(in: storage, text: text, full: full, codeRanges: codeRanges)
-
-        applyHeadings(in: storage, text: text, full: full, codeRanges: codeRanges)
-        applyBlockquotes(in: storage, text: text, full: full, codeRanges: codeRanges)
-        applyLists(in: storage, text: text, full: full, codeRanges: codeRanges)
-        applyHR(in: storage, text: text, full: full, codeRanges: codeRanges)
-
-        applyBold(in: storage, text: text, full: full, codeRanges: codeRanges)
-        applyItalic(in: storage, text: text, full: full, codeRanges: codeRanges)
-        applyStrike(in: storage, text: text, full: full, codeRanges: codeRanges)
-        applyLinks(in: storage, text: text, full: full, codeRanges: codeRanges)
+        for rule in rules {
+            rule.pattern.enumerateMatches(
+                in: storage.string,
+                options: [],
+                range: full
+            ) { match, _, _ in
+                guard let match = match else { return }
+                if !rule.occupies, occupied.intersects(in: match.range) {
+                    return
+                }
+                rule.stamp(match, context)
+                if rule.occupies {
+                    occupied.add(in: match.range)
+                }
+            }
+        }
     }
 
-    // MARK: - Base
+    // MARK: - Base prose
 
     func baseAttributes() -> [NSAttributedString.Key: Any] {
         let body = Theme.bodyFont.pointSize
         let para = NSMutableParagraphStyle()
-        // Use `lineSpacing` (extra leading between lines) rather than
-        // `lineHeightMultiple` (which inflates the whole line box). This
-        // keeps the caret at natural font height instead of being stretched
-        // to fit an enlarged line box.
         para.lineSpacing = body * Theme.extraLeadingRatio
         para.paragraphSpacing = body * 0.55
         para.alignment = .natural
@@ -101,317 +61,486 @@ final class MarkdownStyler {
         ]
     }
 
-    private func overlaps(_ range: NSRange, _ set: NSIndexSet) -> Bool {
-        set.intersects(in: range)
+    // MARK: - Rule plumbing
+
+    struct Context {
+        let storage: NSTextStorage
+        let occupied: NSMutableIndexSet
     }
 
-    private func markOccupied(_ range: NSRange, _ set: NSMutableIndexSet) {
-        set.add(in: range)
+    struct Rule {
+        let pattern: NSRegularExpression
+        /// Rules with `occupies == true` prevent later rules from firing
+        /// inside their match range. Use this for code spans and fenced
+        /// code blocks, where content must not be re-parsed as markdown.
+        let occupies: Bool
+        let stamp: (NSTextCheckingResult, Context) -> Void
     }
 
-    // MARK: - Block: Code
+    // MARK: - Rule list (ordered)
 
-    private func applyFencedCode(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        fenced.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
-            let blockRange = match.range(at: 2)
-            storage.addAttributes(
+    private static func allRules() -> [Rule] {
+        return [
+            fencedCode(),
+            indentedCode(),
+            inlineCode(),
+            setextHeading1(),
+            setextHeading2(),
+            atxHeading(),
+            horizontalRule(),
+            taskListItem(),
+            listItem(),
+            blockquote(),
+            tableRow(),
+            referenceDefinition(),
+            footnoteDefinition(),
+            bold(),
+            italicStar(),
+            italicUnderscore(),
+            strikethrough(),
+            image(),
+            inlineLink(),
+            referenceLink(),
+            footnoteReference(),
+            autolink(),
+            hardLineBreak(),
+            escape(),
+        ]
+    }
+
+    // MARK: - Regex helper
+
+    private static func regex(_ pattern: String) -> NSRegularExpression {
+        // `dotMatchesLineSeparators` off by default; enable per-rule when needed.
+        return try! NSRegularExpression(pattern: pattern, options: [])
+    }
+
+    // MARK: - Code
+
+    private static func fencedCode() -> Rule {
+        // ``` fenced ``` over multiple lines, optional language tag.
+        let pattern = try! NSRegularExpression(
+            pattern: "(^|\\n)(```[^\\n]*\\n[\\s\\S]*?\\n```)(?=\\n|$)",
+            options: []
+        )
+        return Rule(pattern: pattern, occupies: true) { match, ctx in
+            let block = match.range(at: 2)
+            ctx.storage.addAttributes(
                 [
                     .font: Theme.codeFont,
                     .foregroundColor: Theme.textColor,
                     .backgroundColor: Theme.codeBackground,
                 ],
-                range: blockRange
+                range: block
             )
-            self.markOccupied(blockRange, codeRanges)
         }
     }
 
-    private func applyIndentedCode(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        indentedCode.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
-            let lineRange = match.range
-            if self.overlaps(lineRange, codeRanges) { return }
-            storage.addAttributes(
+    private static func indentedCode() -> Rule {
+        let pattern = try! NSRegularExpression(
+            pattern: "(?m)^(    |\\t)(.+)$",
+            options: []
+        )
+        return Rule(pattern: pattern, occupies: true) { match, ctx in
+            ctx.storage.addAttributes(
                 [
                     .font: Theme.codeFont,
                     .backgroundColor: Theme.codeBackground,
                 ],
-                range: lineRange
+                range: match.range
             )
-            self.markOccupied(lineRange, codeRanges)
         }
     }
 
-    private func applyInlineCode(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        inlineCode.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
+    private static func inlineCode() -> Rule {
+        let pattern = regex("`([^`\\n]+)`")
+        return Rule(pattern: pattern, occupies: true) { match, ctx in
             let whole = match.range
-            if self.overlaps(whole, codeRanges) { return }
-            let inner = match.range(at: 1)
-            storage.addAttributes(
+            ctx.storage.addAttributes(
                 [
                     .font: Theme.codeFont,
                     .backgroundColor: Theme.codeBackground,
                 ],
                 range: whole
             )
-            // dim the tick marks
-            let leftTick = NSRange(location: whole.location, length: 1)
-            let rightTick = NSRange(location: whole.location + whole.length - 1, length: 1)
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: leftTick)
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: rightTick)
-            storage.addAttribute(.foregroundColor, value: Theme.textColor, range: inner)
-            self.markOccupied(whole, codeRanges)
+            ctx.storage.markSyntax(NSRange(location: whole.location, length: 1))
+            ctx.storage.markSyntax(NSRange(location: whole.location + whole.length - 1, length: 1))
         }
     }
 
-    // MARK: - Block: Structure
+    // MARK: - Headings
 
-    private func applyHeadings(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        heading.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
+    /// Paragraph style shared by every heading level. The reader wants
+    /// more air above a heading than below it (Bringhurst §8.1), tight
+    /// leading inside the heading itself.
+    private static func headingParagraphStyle(size: CGFloat) -> NSParagraphStyle {
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = size * 0.12
+        para.paragraphSpacingBefore = size * 1.1
+        para.paragraphSpacing = size * 0.35
+        para.alignment = .natural
+        return para
+    }
+
+    private static func atxHeading() -> Rule {
+        let pattern = regex("(?m)^(#{1,6})(\\s+)([^\\n]+)$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
             let whole = match.range
-            if self.overlaps(whole, codeRanges) { return }
             let hashes = match.range(at: 1)
-            let level = hashes.length
-            let font = Theme.headingFont(level: level)
-
-            storage.addAttribute(.font, value: font, range: whole)
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: hashes)
-            // leading space after hashes — also part of the marker, strip in preview
-            let space = match.range(at: 2)
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: space)
-
-            let para = NSMutableParagraphStyle()
-            let headingSize = font.pointSize
-            para.lineSpacing = headingSize * 0.12
-            // Bringhurst §8.1 — more air above a heading than below it; the
-            // reader needs a moment of silence before the new section begins.
-            para.paragraphSpacingBefore = headingSize * 1.1
-            para.paragraphSpacing = headingSize * 0.35
-            para.alignment = .natural
-            storage.addAttribute(.paragraphStyle, value: para, range: whole)
+            let font = Theme.headingFont(level: hashes.length)
+            ctx.storage.addAttribute(.font, value: font, range: whole)
+            ctx.storage.markSyntax(hashes)
+            ctx.storage.markSyntax(match.range(at: 2))
+            ctx.storage.addAttribute(.paragraphStyle, value: headingParagraphStyle(size: font.pointSize), range: whole)
         }
     }
 
-    private func applyBlockquotes(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        blockquote.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
+    private static func setextHeading1() -> Rule {
+        let pattern = regex("(?m)^([^\\n]+)\\n(=+)\\s*$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let font = Theme.headingFont(level: 1)
+            ctx.storage.addAttribute(.font, value: font, range: match.range(at: 1))
+            ctx.storage.markSyntax(match.range(at: 2))
+            ctx.storage.addAttribute(.paragraphStyle, value: headingParagraphStyle(size: font.pointSize), range: match.range)
+        }
+    }
+
+    private static func setextHeading2() -> Rule {
+        // `Title\n---` — but only if the title line isn't itself a list
+        // bullet or blockquote (which would fight this interpretation).
+        let pattern = regex("(?m)^([^\\n]+)\\n(-{2,})\\s*$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let titleLine = match.range(at: 1)
+            let titleText = (ctx.storage.string as NSString).substring(with: titleLine)
+            if titleText.range(of: "^\\s*([-*+]|\\d+\\.)\\s+", options: .regularExpression) != nil {
+                return
+            }
+            let font = Theme.headingFont(level: 2)
+            ctx.storage.addAttribute(.font, value: font, range: titleLine)
+            ctx.storage.markSyntax(match.range(at: 2))
+            ctx.storage.addAttribute(.paragraphStyle, value: headingParagraphStyle(size: font.pointSize), range: match.range)
+        }
+    }
+
+    // MARK: - Block
+
+    private static func horizontalRule() -> Rule {
+        let pattern = regex("(?m)^(-{3,}|\\*{3,}|_{3,})\\s*$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.quaternaryColor, range: match.range)
+        }
+    }
+
+    private static func blockquote() -> Rule {
+        let pattern = regex("(?m)^(>\\s*)(.*)$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
             let whole = match.range
-            if self.overlaps(whole, codeRanges) { return }
             let marker = match.range(at: 1)
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: marker)
-            storage.addAttribute(.foregroundColor, value: Theme.secondaryColor, range: whole)
-            let italicFont = NSFontManager.shared.convert(Theme.bodyFont, toHaveTrait: .italicFontMask)
-            storage.addAttribute(.font, value: italicFont, range: match.range(at: 2))
+            let content = match.range(at: 2)
+
+            ctx.storage.markSyntax(marker)
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.secondaryColor, range: whole)
+            let italic = NSFontManager.shared.convert(Theme.bodyFont, toHaveTrait: .italicFontMask)
+            ctx.storage.addAttribute(.font, value: italic, range: content)
 
             let para = NSMutableParagraphStyle()
             para.lineSpacing = Theme.bodyFont.pointSize * Theme.extraLeadingRatio
-            // Block-quote indent — Bringhurst §2.3.4: quotations are "set off
-            // from the main text by space or by indention or both." Both
-            // first line and wrapped lines sit at ~1.5em so the `>` marker
-            // and its content shift right as a whole.
             let indent = Theme.bodyFont.pointSize * 1.5
             para.firstLineHeadIndent = indent
             para.headIndent = indent
             para.paragraphSpacing = Theme.bodyFont.pointSize * 0.3
-            storage.addAttribute(.paragraphStyle, value: para, range: whole)
+            ctx.storage.addAttribute(.paragraphStyle, value: para, range: whole)
         }
     }
 
-    private func applyLists(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        listItem.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
+    private static func listItem() -> Rule {
+        let pattern = regex("(?m)^(\\s*)([-*+]|\\d+\\.)(\\s+)(.+)$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
             let whole = match.range
-            if self.overlaps(whole, codeRanges) { return }
             let marker = match.range(at: 2)
-            // Preserve the bullet/number as a rendered glyph in preview — only
-            // strip the trailing space if desired. Keeping the marker keeps
-            // list structure legible without markdown syntax.
-            storage.addAttribute(.foregroundColor, value: Theme.syntaxColor, range: marker)
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.syntaxColor, range: marker)
 
-            // Hanging indent: wrapped lines align with the text, not the marker.
             let para = NSMutableParagraphStyle()
             para.lineSpacing = Theme.bodyFont.pointSize * Theme.extraLeadingRatio
             para.firstLineHeadIndent = 0
             para.headIndent = Theme.bodyFont.pointSize * 1.4
             para.paragraphSpacing = Theme.bodyFont.pointSize * 0.15
-            storage.addAttribute(.paragraphStyle, value: para, range: whole)
+            ctx.storage.addAttribute(.paragraphStyle, value: para, range: whole)
         }
     }
 
-    private func applyHR(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        hr.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
+    private static func taskListItem() -> Rule {
+        // `- [ ] task` / `- [x] done` — stamp a visual "box" style on the
+        // checkbox, strike-through completed items.
+        let pattern = regex("(?m)^(\\s*)([-*+])(\\s+)(\\[([ xX])\\])(\\s+)(.+)$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
             let whole = match.range
-            if self.overlaps(whole, codeRanges) { return }
-            storage.addAttribute(.foregroundColor, value: Theme.quaternaryColor, range: whole)
+            let marker = match.range(at: 2)
+            let checkbox = match.range(at: 4)
+            let state = match.range(at: 5)
+            let content = match.range(at: 7)
+
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.syntaxColor, range: marker)
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.syntaxColor, range: checkbox)
+
+            let storageText = ctx.storage.string as NSString
+            let stateChar = storageText.substring(with: state).trimmingCharacters(in: .whitespaces).lowercased()
+            if stateChar == "x" {
+                ctx.storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: content)
+                ctx.storage.addAttribute(.foregroundColor, value: Theme.secondaryColor, range: content)
+            }
+
+            let para = NSMutableParagraphStyle()
+            para.lineSpacing = Theme.bodyFont.pointSize * Theme.extraLeadingRatio
+            para.firstLineHeadIndent = 0
+            para.headIndent = Theme.bodyFont.pointSize * 1.8
+            para.paragraphSpacing = Theme.bodyFont.pointSize * 0.15
+            ctx.storage.addAttribute(.paragraphStyle, value: para, range: whole)
         }
     }
 
-    // MARK: - Inline
-
-    private func applyBold(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        bold.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
+    private static func tableRow() -> Rule {
+        // Match any line that looks like a table row: starts and ends with
+        // `|`, has at least one interior `|`. Cells are monospace so columns
+        // align visually in the source-is-rendered model.
+        let pattern = regex("(?m)^(\\s*\\|.+\\|)\\s*$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
             let whole = match.range
-            if self.overlaps(whole, codeRanges) { return }
-            let currentFont = storage.attribute(.font, at: whole.location, effectiveRange: nil) as? NSFont ?? Theme.bodyFont
-            let boldFont = NSFontManager.shared.convert(currentFont, toHaveTrait: .boldFontMask)
-            storage.addAttribute(.font, value: boldFont, range: whole)
-            let leftMark = NSRange(location: whole.location, length: 2)
-            let rightMark = NSRange(location: whole.location + whole.length - 2, length: 2)
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: leftMark)
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: rightMark)
-        }
-    }
+            ctx.storage.addAttribute(.font, value: Theme.codeFont, range: whole)
 
-    private func applyItalic(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        for regex in [italicStar, italicUnder] {
-            regex.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-                guard let match = match else { return }
-                let whole = match.range
-                if self.overlaps(whole, codeRanges) { return }
-                let currentFont = storage.attribute(.font, at: whole.location, effectiveRange: nil) as? NSFont ?? Theme.bodyFont
-                let italicFont = NSFontManager.shared.convert(currentFont, toHaveTrait: .italicFontMask)
-                storage.addAttribute(.font, value: italicFont, range: whole)
-                let leftMark = NSRange(location: whole.location, length: 1)
-                let rightMark = NSRange(location: whole.location + whole.length - 1, length: 1)
-                storage.addAttributes([
-                    .foregroundColor: Theme.syntaxColor,
-                    .isMarkdownSyntax: true,
-                ], range: leftMark)
-                storage.addAttributes([
-                    .foregroundColor: Theme.syntaxColor,
-                    .isMarkdownSyntax: true,
-                ], range: rightMark)
+            // Dim every `|` pipe character as syntax.
+            let ns = ctx.storage.string as NSString
+            let line = ns.substring(with: whole)
+            var offset = 0
+            for ch in line {
+                if ch == "|" {
+                    let r = NSRange(location: whole.location + offset, length: 1)
+                    ctx.storage.markSyntax(r)
+                }
+                offset += 1
+            }
+
+            // Dim separator rows entirely (`|---|---|`).
+            if line.range(of: "^\\s*\\|?[\\s:\\-|]+\\|?\\s*$", options: .regularExpression) != nil,
+               line.contains("-") {
+                ctx.storage.addAttribute(.foregroundColor, value: Theme.syntaxColor, range: whole)
             }
         }
     }
 
-    private func applyStrike(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        strike.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
+    // MARK: - Inline emphasis
+
+    private static func bold() -> Rule {
+        let pattern = try! NSRegularExpression(
+            pattern: "(\\*\\*|__)(?=\\S)(.+?)(?<=\\S)\\1",
+            options: [.dotMatchesLineSeparators]
+        )
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
             let whole = match.range
-            if self.overlaps(whole, codeRanges) { return }
-            storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: whole)
-            let leftMark = NSRange(location: whole.location, length: 2)
-            let rightMark = NSRange(location: whole.location + whole.length - 2, length: 2)
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: leftMark)
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: rightMark)
+            let currentFont = ctx.storage.attribute(.font, at: whole.location, effectiveRange: nil) as? NSFont ?? Theme.bodyFont
+            let boldFont = NSFontManager.shared.convert(currentFont, toHaveTrait: .boldFontMask)
+            ctx.storage.addAttribute(.font, value: boldFont, range: whole)
+            ctx.storage.markSyntax(NSRange(location: whole.location, length: 2))
+            ctx.storage.markSyntax(NSRange(location: whole.location + whole.length - 2, length: 2))
         }
     }
 
-    private func applyLinks(
-        in storage: NSTextStorage,
-        text: NSString,
-        full: NSRange,
-        codeRanges: NSMutableIndexSet
-    ) {
-        link.enumerateMatches(in: storage.string, options: [], range: full) { match, _, _ in
-            guard let match = match else { return }
+    private static func italicStar() -> Rule {
+        let pattern = regex("(?<![*\\w])\\*(?=\\S)([^*\\n]+?)(?<=\\S)\\*(?![*\\w])")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            Self.stampItalic(match, ctx: ctx, markerLength: 1)
+        }
+    }
+
+    private static func italicUnderscore() -> Rule {
+        let pattern = regex("(?<![_\\w])_(?=\\S)([^_\\n]+?)(?<=\\S)_(?![_\\w])")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            Self.stampItalic(match, ctx: ctx, markerLength: 1)
+        }
+    }
+
+    private static func stampItalic(_ match: NSTextCheckingResult, ctx: Context, markerLength: Int) {
+        let whole = match.range
+        let currentFont = ctx.storage.attribute(.font, at: whole.location, effectiveRange: nil) as? NSFont ?? Theme.bodyFont
+        let italicFont = NSFontManager.shared.convert(currentFont, toHaveTrait: .italicFontMask)
+        ctx.storage.addAttribute(.font, value: italicFont, range: whole)
+        ctx.storage.markSyntax(NSRange(location: whole.location, length: markerLength))
+        ctx.storage.markSyntax(NSRange(location: whole.location + whole.length - markerLength, length: markerLength))
+    }
+
+    private static func strikethrough() -> Rule {
+        let pattern = regex("~~(?=\\S)([^\\n]+?)(?<=\\S)~~")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
             let whole = match.range
-            if self.overlaps(whole, codeRanges) { return }
+            ctx.storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: whole)
+            ctx.storage.markSyntax(NSRange(location: whole.location, length: 2))
+            ctx.storage.markSyntax(NSRange(location: whole.location + whole.length - 2, length: 2))
+        }
+    }
+
+    // MARK: - Links & images
+
+    private static func inlineLink() -> Rule {
+        let pattern = regex("(?<!\\!)\\[([^\\]\\n]+)\\]\\(([^)\\n]+)\\)")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let whole = match.range
             let label = match.range(at: 1)
             let urlRange = match.range(at: 2)
-            let urlString = text.substring(with: urlRange)
-            storage.addAttribute(.foregroundColor, value: Theme.linkColor, range: label)
-            storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: label)
-            // The URL portion — stripped entirely in preview.
-            storage.addAttributes([
-                .foregroundColor: Theme.syntaxColor,
-                .isMarkdownSyntax: true,
-            ], range: urlRange)
-            let openBracket = NSRange(location: whole.location, length: 1)
-            let closeBracketOpenParen = NSRange(location: label.location + label.length, length: 2)
-            let closeParen = NSRange(location: whole.location + whole.length - 1, length: 1)
-            for r in [openBracket, closeBracketOpenParen, closeParen] {
-                storage.addAttributes([
-                    .foregroundColor: Theme.syntaxColor,
-                    .isMarkdownSyntax: true,
-                ], range: r)
-            }
-            if let url = URL(string: urlString.trimmingCharacters(in: .whitespaces)) {
-                storage.addAttribute(.link, value: url, range: label)
+            let urlString = (ctx.storage.string as NSString).substring(with: urlRange)
+                .trimmingCharacters(in: .whitespaces)
+
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.linkColor, range: label)
+            ctx.storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: label)
+            ctx.storage.markSyntax(urlRange)
+            ctx.storage.markSyntax(NSRange(location: whole.location, length: 1))
+            ctx.storage.markSyntax(NSRange(location: label.location + label.length, length: 2))
+            ctx.storage.markSyntax(NSRange(location: whole.location + whole.length - 1, length: 1))
+
+            if let url = safeURL(from: urlString) {
+                ctx.storage.addAttribute(.link, value: url, range: label)
             }
         }
+    }
+
+    /// Allowlist the URL schemes that may be made clickable. `NSTextView`
+    /// opens clicked `.link` values via `NSWorkspace`, which honours
+    /// `file://`, custom app schemes, and other vectors a hostile `.md`
+    /// source should not be able to trigger with one click.
+    private static func safeURL(from string: String) -> URL? {
+        guard let url = URL(string: string), let scheme = url.scheme?.lowercased() else {
+            return nil
+        }
+        let allowed: Set<String> = ["http", "https", "mailto"]
+        return allowed.contains(scheme) ? url : nil
+    }
+
+    private static func image() -> Rule {
+        // `![alt](url)` — same shape as a link with a `!` prefix. We dim
+        // the whole thing (can't render the bitmap inside a text view
+        // without replacing source characters); the alt text remains
+        // legible, the URL is marked syntax.
+        let pattern = regex("!\\[([^\\]\\n]*)\\]\\(([^)\\n]+)\\)")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let whole = match.range
+            let alt = match.range(at: 1)
+            let urlRange = match.range(at: 2)
+
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.secondaryColor, range: alt)
+            ctx.storage.markSyntax(urlRange)
+            ctx.storage.markSyntax(NSRange(location: whole.location, length: 2))         // `![`
+            ctx.storage.markSyntax(NSRange(location: alt.location + alt.length, length: 2)) // `](`
+            ctx.storage.markSyntax(NSRange(location: whole.location + whole.length - 1, length: 1)) // `)`
+        }
+    }
+
+    private static func autolink() -> Rule {
+        // `<https://example.com>` or `<user@example.com>`.
+        let pattern = regex("<((?:https?://|mailto:)[^>\\s]+|[\\w._%+-]+@[\\w.-]+\\.[A-Za-z]{2,})>")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let whole = match.range
+            let inside = match.range(at: 1)
+            ctx.storage.markSyntax(NSRange(location: whole.location, length: 1))
+            ctx.storage.markSyntax(NSRange(location: whole.location + whole.length - 1, length: 1))
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.linkColor, range: inside)
+            ctx.storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: inside)
+
+            let raw = (ctx.storage.string as NSString).substring(with: inside)
+            let urlString = raw.contains("@") && !raw.hasPrefix("mailto:") ? "mailto:" + raw : raw
+            if let url = safeURL(from: urlString) {
+                ctx.storage.addAttribute(.link, value: url, range: inside)
+            }
+        }
+    }
+
+    private static func referenceLink() -> Rule {
+        // `[label][ref]` or `[label][]` — we can't resolve the ref without
+        // a full two-pass parse, but we style the label as link-coloured
+        // and mark the ref as syntax. The reference definition rule takes
+        // care of the `[ref]: url` definitions elsewhere.
+        let pattern = regex("(?<!\\!)\\[([^\\]\\n]+)\\]\\[([^\\]\\n]*)\\]")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let whole = match.range
+            let label = match.range(at: 1)
+            let ref = match.range(at: 2)
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.linkColor, range: label)
+            ctx.storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: label)
+            ctx.storage.markSyntax(NSRange(location: whole.location, length: 1))
+            ctx.storage.markSyntax(NSRange(location: label.location + label.length, length: 2))
+            ctx.storage.markSyntax(ref)
+            ctx.storage.markSyntax(NSRange(location: whole.location + whole.length - 1, length: 1))
+        }
+    }
+
+    private static func referenceDefinition() -> Rule {
+        // `[ref]: https://example.com "Optional Title"` at the start of a line.
+        let pattern = regex("(?m)^(\\[[^\\]\\n]+\\]):\\s+(\\S+)(\\s+\"[^\"\\n]*\")?\\s*$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let whole = match.range
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.secondaryColor, range: whole)
+            let label = match.range(at: 1)
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.linkColor, range: label)
+        }
+    }
+
+    private static func footnoteReference() -> Rule {
+        // `[^1]` inline — render slightly raised and dimmed.
+        let pattern = regex("\\[\\^([^\\]\\n]+)\\]")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let whole = match.range
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.linkColor, range: whole)
+            ctx.storage.addAttribute(.baselineOffset, value: 3, range: whole)
+            let smallFont = NSFont.systemFont(ofSize: Theme.bodyFont.pointSize * 0.8)
+            ctx.storage.addAttribute(.font, value: smallFont, range: whole)
+        }
+    }
+
+    private static func footnoteDefinition() -> Rule {
+        // `[^1]: footnote text` at start of a line.
+        let pattern = regex("(?m)^(\\[\\^[^\\]\\n]+\\]):\\s*(.+)$")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let label = match.range(at: 1)
+            let body = match.range(at: 2)
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.linkColor, range: label)
+            ctx.storage.addAttribute(.foregroundColor, value: Theme.secondaryColor, range: body)
+            let italic = NSFontManager.shared.convert(Theme.bodyFont, toHaveTrait: .italicFontMask)
+            ctx.storage.addAttribute(.font, value: italic, range: body)
+        }
+    }
+
+    private static func hardLineBreak() -> Rule {
+        // Two spaces before a newline = hard break. We highlight the two
+        // trailing spaces so the writer can see the break is there.
+        let pattern = regex("(  )\\n")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let spaces = match.range(at: 1)
+            ctx.storage.addAttribute(.backgroundColor, value: Theme.codeBackground, range: spaces)
+            ctx.storage.markSyntax(spaces)
+        }
+    }
+
+    private static func escape() -> Rule {
+        // `\*`, `\_`, `\\`, etc. — dim the backslash so the next character
+        // reads as the literal. Note: because escape runs last, any prior
+        // emphasis rule that would have consumed the marker has already
+        // fired. This is imperfect vs. a real parser but good enough for
+        // readable source.
+        let pattern = regex("\\\\[\\\\`*_{}\\[\\]()#+\\-.!>~|]")
+        return Rule(pattern: pattern, occupies: false) { match, ctx in
+            let slash = NSRange(location: match.range.location, length: 1)
+            ctx.storage.markSyntax(slash)
+        }
+    }
+}
+
+// MARK: - Convenience
+
+private extension NSTextStorage {
+    /// Tint a range as a markdown syntax marker and flag it so preview mode
+    /// can strip it.
+    func markSyntax(_ range: NSRange) {
+        addAttributes([
+            .foregroundColor: Theme.syntaxColor,
+            .isMarkdownSyntax: true,
+        ], range: range)
     }
 }

@@ -4,6 +4,5 @@
 xcuserdata/
 *.xcodeproj
 build/
-Package.resolved
 Resources/AppIcon.iconset/
 /tmp/
