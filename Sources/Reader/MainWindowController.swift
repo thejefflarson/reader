@@ -89,7 +89,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
 
         bottomBar.update(for: "", documentName: nil)
-        textView.placeholder = "Start writing."
         window.makeFirstResponder(textView)
     }
 
