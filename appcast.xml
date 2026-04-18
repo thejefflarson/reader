@@ -7,7 +7,23 @@
         <link>https://raw.githubusercontent.com/thejefflarson/reader/main/appcast.xml</link>
         <description>Reader updates.</description>
         <language>en</language>
-        <item>
+                <item>
+            <title>Version 1.1.0</title>
+            <pubDate>Sat, 18 Apr 2026 09:21:17 +0000</pubDate>
+            <sparkle:version>1.1.0</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[Full markdown coverage (Setext headings, images, autolinks, reference
+links, task lists, tables, footnotes, hard breaks, escape sequences),
+declarative styler refactor, URL-scheme allowlist, dropped HTML paste
+path, pinned Sparkle dependency, ADRs + security review.]]></description>
+            <enclosure
+                url="https://github.com/thejefflarson/reader/releases/download/v1.1.0/Reader-1.1.0.zip"
+                length="1286262"
+                type="application/octet-stream"
+                sparkle:edSignature="ra0LXJwkDmR2/v1jPuzKAtU91gxdsyAZtlPUwyboPIOv5bsk6E5sc8tQXw8YX9/VdDkJt/oNIBNmkzunkaqcCw==" />
+        </item>
+<item>
             <title>Version 1.0.0</title>
             <pubDate>Sat, 18 Apr 2026 09:02:49 +0000</pubDate>
             <sparkle:version>1.0.0</sparkle:version>
