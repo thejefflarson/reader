@@ -49,6 +49,17 @@ First launch: right-click → Open → Open (Gatekeeper warns on ad-hoc signed a
 
 To make Reader the default markdown handler: `./scripts/build-app.sh --install`, then Finder → Get Info on any `.md` file → Open With → Reader → Change All….
 
+## Command line
+
+```bash
+./scripts/install-cli.sh      # symlinks `reader` into /usr/local/bin or ~/.local/bin
+reader path/to/file.md        # open a markdown file in Reader
+reader                        # launch Reader with no document
+```
+
+Paths resolve to absolute before being handed to Launch Services, so
+`reader ./notes.md` works from any directory.
+
 ## Releasing
 
 ```bash

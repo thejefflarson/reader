@@ -30,6 +30,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.backgroundColor = Theme.editorBackground
         window.isMovableByWindowBackground = true
         window.toolbar = nil
+        if #available(macOS 11.0, *) {
+            window.titlebarSeparatorStyle = .none
+        }
 
         // ScrollView + EditorTextView
         let scroll = NSScrollView(frame: .zero)
@@ -47,7 +50,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         container.heightTracksTextView = false
         container.lineFragmentPadding = 0
 
-        let layoutManager = NSLayoutManager()
+        let layoutManager = CodeBlockLayoutManager()
         layoutManager.addTextContainer(container)
         let storage = NSTextStorage()
         storage.addLayoutManager(layoutManager)
@@ -164,7 +167,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidResize(_ notification: Notification) {
         centerEditorContainer()
-        editor.reapplyStyling()
+        // Don't restyle in preview mode — the storage holds rendered text,
+        // not markdown source. `reapplyStyling()` is also guarded, but the
+        // explicit guard here documents the invariant at the call site.
+        if !editor.isPreviewing {
+            editor.reapplyStyling()
+        }
     }
 
     // MARK: - Document model
@@ -186,6 +194,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             currentFileURL = url
             markdown = content
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
+            // Opened documents land in preview mode — a file you received
+            // is something you read first, not something you're drafting.
+            // New blank windows (⌘N) stay in edit mode.
+            editor.enterPreview()
+            bottomBar.setPreviewing(true)
         } catch {
             NSAlert(error: error).runModal()
         }

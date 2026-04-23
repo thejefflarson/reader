@@ -130,13 +130,12 @@ enum Theme {
         textColor.withAlphaComponent(0.06)
     }
 
-    /// Warm off-white in light mode (Tufte tradition `#FDFCF8`), warm
-    /// near-black in dark (`#1C1B1A`) — dark enough to avoid OLED halation
-    /// around bright characters, warm enough not to feel clinical.
+    /// Warm off-white in light mode (Tufte tradition `#FDFCF8`), pure black
+    /// in dark mode for that true night-mode feel.
     static var editorBackground: NSColor {
         NSColor(name: "readerPage") { appearance in
             appearance.isDarkMode
-                ? NSColor(red: 0x1C/255, green: 0x1B/255, blue: 0x1A/255, alpha: 1)
+                ? .black
                 : NSColor(red: 0xFD/255, green: 0xFC/255, blue: 0xF8/255, alpha: 1)
         }
     }
@@ -144,7 +143,7 @@ enum Theme {
     static var chromeBackground: NSColor {
         NSColor(name: "readerChrome") { appearance in
             appearance.isDarkMode
-                ? NSColor(red: 0x17/255, green: 0x16/255, blue: 0x15/255, alpha: 1)
+                ? .black
                 : NSColor(red: 0xF7/255, green: 0xF5/255, blue: 0xEF/255, alpha: 1)
         }
     }
