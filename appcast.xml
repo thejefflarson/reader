@@ -7,7 +7,20 @@
         <link>https://raw.githubusercontent.com/thejefflarson/reader/main/appcast.xml</link>
         <description>Reader updates.</description>
         <language>en</language>
-                <item>
+                        <item>
+            <title>Version 1.2.0</title>
+            <pubDate>Thu, 23 Apr 2026 01:54:36 +0000</pubDate>
+            <sparkle:version>1.2.0</sparkle:version>
+            <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[Code blocks now fill the full line width with padding. Preview mode strips triple-backtick fences and survives window resize. Dark mode dropped to pure black. Opening a file goes straight to preview. New reader CLI.]]></description>
+            <enclosure
+                url="https://github.com/thejefflarson/reader/releases/download/v1.2.0/Reader-1.2.0.zip"
+                length="1268434"
+                type="application/octet-stream"
+                sparkle:edSignature="fPJkNmrGnNVsZGkPYxJt92Ro0EalQ/+vKlQN+AWzq26LN0k3OT50hz5qY/PTE567gFTPK26zFUemHlBMhTh7AA==" />
+        </item>
+<item>
             <title>Version 1.1.0</title>
             <pubDate>Sat, 18 Apr 2026 09:21:17 +0000</pubDate>
             <sparkle:version>1.1.0</sparkle:version>
