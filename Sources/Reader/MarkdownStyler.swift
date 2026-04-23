@@ -117,22 +117,65 @@ final class MarkdownStyler {
 
     // MARK: - Code
 
+    /// Paragraph style for block-level code — horizontal inset so text
+    /// doesn't hug the fill edge, vertical breathing room so the code
+    /// band doesn't kiss the surrounding prose.
+    private static func codeBlockParagraphStyle() -> NSParagraphStyle {
+        let para = NSMutableParagraphStyle()
+        para.firstLineHeadIndent = 16
+        para.headIndent = 16
+        para.tailIndent = -16
+        para.lineSpacing = 2
+        para.paragraphSpacingBefore = 10
+        para.paragraphSpacing = 10
+        return para
+    }
+
     private static func fencedCode() -> Rule {
-        // ``` fenced ``` over multiple lines, optional language tag.
+        // ``` fenced ``` over multiple lines, optional language tag. We capture
+        // the opening fence line, the content, and the closing fence line as
+        // three groups so preview mode can strip the fence lines (marked
+        // `.isMarkdownSyntax`) while keeping the code content. The whole
+        // match range is flagged `.isCodeBlock` so the custom layout manager
+        // paints the background as a full-width band.
         let pattern = try! NSRegularExpression(
-            pattern: "(^|\\n)(```[^\\n]*\\n[\\s\\S]*?\\n```)(?=\\n|$)",
+            pattern: "(?m)^(```[^\\n]*)\\n([\\s\\S]*?)\\n(```)\\s*$",
             options: []
         )
         return Rule(pattern: pattern, occupies: true) { match, ctx in
-            let block = match.range(at: 2)
+            let whole = match.range
+            let opening = match.range(at: 1)
+            let content = match.range(at: 2)
+            let closing = match.range(at: 3)
+
+            let openingLine = NSRange(
+                location: opening.location,
+                length: opening.length + 1
+            )
+            let contentEnd = content.location + content.length
+            let closingLine = NSRange(
+                location: contentEnd,
+                length: closing.location + closing.length - contentEnd
+            )
+
+            // Whole block: full-width code background + padding.
             ctx.storage.addAttributes(
                 [
                     .font: Theme.codeFont,
                     .foregroundColor: Theme.textColor,
                     .backgroundColor: Theme.codeBackground,
+                    .isCodeBlock: true,
+                    .paragraphStyle: codeBlockParagraphStyle(),
                 ],
-                range: block
+                range: whole
             )
+            // Fence lines are markdown syntax — preview mode strips them.
+            let fenceAttrs: [NSAttributedString.Key: Any] = [
+                .foregroundColor: Theme.syntaxColor,
+                .isMarkdownSyntax: true,
+            ]
+            ctx.storage.addAttributes(fenceAttrs, range: openingLine)
+            ctx.storage.addAttributes(fenceAttrs, range: closingLine)
         }
     }
 
@@ -146,6 +189,8 @@ final class MarkdownStyler {
                 [
                     .font: Theme.codeFont,
                     .backgroundColor: Theme.codeBackground,
+                    .isCodeBlock: true,
+                    .paragraphStyle: codeBlockParagraphStyle(),
                 ],
                 range: match.range
             )

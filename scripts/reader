@@ -1,0 +1,47 @@
+#!/bin/sh
+# reader — open markdown files in Reader.app.
+#
+#   reader              launch Reader (no document)
+#   reader <file>...    open one or more files
+#
+# Paths are resolved to absolute before being handed to Launch Services
+# so Reader's document handler receives them correctly regardless of the
+# shell's current working directory.
+
+set -e
+
+BUNDLE_ID="com.jefflarson.Reader"
+
+case "${1:-}" in
+    -h|--help)
+        cat <<EOF
+reader — open markdown files in Reader.app
+
+  reader              launch Reader
+  reader <file>...    open files in Reader
+  reader -h           show this help
+EOF
+        exit 0
+        ;;
+esac
+
+if [ $# -eq 0 ]; then
+    exec /usr/bin/open -b "$BUNDLE_ID"
+fi
+
+absolute_paths=""
+for arg in "$@"; do
+    if [ ! -e "$arg" ]; then
+        echo "reader: $arg: no such file" >&2
+        exit 1
+    fi
+    abs="$(/usr/bin/dirname "$arg")"
+    abs="$(cd "$abs" && pwd)/$(/usr/bin/basename "$arg")"
+    absolute_paths="$absolute_paths
+$abs"
+done
+
+# Pass each path as a separate argument via xargs so paths with spaces
+# survive untouched.
+printf '%s' "$absolute_paths" | /usr/bin/tr '\n' '\0' \
+    | /usr/bin/xargs -0 /usr/bin/open -b "$BUNDLE_ID"

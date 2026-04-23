@@ -49,6 +49,15 @@ final class MarkdownPreviewTests: XCTestCase {
         XCTAssertEqual(rendered.string, source)
     }
 
+    func testFencedCodeFencesStripped() {
+        let source = "before\n\n```swift\nlet x = 1\nprint(x)\n```\n\nafter"
+        let rendered = MarkdownPreview.render(source).string
+        XCTAssertFalse(rendered.contains("```"),
+            "preview must strip ``` fences; got: \(rendered)")
+        XCTAssertTrue(rendered.contains("let x = 1"))
+        XCTAssertTrue(rendered.contains("print(x)"))
+    }
+
     // Regression: preview render must never be empty / negative-length;
     // the rendered length is the selection-clamp ceiling after entering
     // preview, and an out-of-bounds value would crash NSString.lineRange.

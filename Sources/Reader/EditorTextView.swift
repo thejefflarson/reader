@@ -105,7 +105,10 @@ final class EditorTextView: NSTextView, NSTextStorageDelegate {
     }
 
     func reapplyStyling() {
-        guard let storage = textStorage else { return }
+        // In preview mode the storage holds the *rendered* text (markers
+        // stripped), not the markdown source — running the styler against
+        // it would reset all attributes and leave nothing to re-match.
+        guard let storage = textStorage, !isPreviewing else { return }
         isRestyling = true
         styler.restyle(storage)
         isRestyling = false
