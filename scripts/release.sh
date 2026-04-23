@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # Cut a new Reader release:
-#   - build the .app at Release config
+#   - `swift build -c release` (Xcode's SPM resolver is sandboxed under
+#     our dev setup and fails; SwiftPM's resolver works fine)
+#   - assemble Reader.app by hand (Info.plist, icon, binary, Sparkle)
 #   - zip it
 #   - sign the zip with Sparkle's sign_update (private key in Keychain)
-#   - append a <item> to appcast.xml
-#   - optionally: upload the zip as a GitHub release asset
+#   - append a new <item> to appcast.xml
 #
 # Usage:  ./scripts/release.sh <version> ["release notes"]
-# Example: ./scripts/release.sh 1.0.1 "Fixes paste handling."
 
 cd "$(dirname "$0")/.."
 
@@ -19,51 +19,49 @@ if [ -z "$VERSION" ]; then
     echo "usage: $0 <version> [\"release notes\"]"
     exit 1
 fi
-
-if [ -z "$NOTES" ]; then
-    NOTES="Reader $VERSION"
-fi
+: "${NOTES:=Reader $VERSION}"
 
 REPO="thejefflarson/reader"
 APP_NAME="Reader"
 BUILD_DIR="$(pwd)/build"
-RELEASE_DIR="$BUILD_DIR/Release"
-APP_PATH="$RELEASE_DIR/$APP_NAME.app"
+APP_DIR="$BUILD_DIR/$APP_NAME.app"
 ZIP_NAME="$APP_NAME-$VERSION.zip"
 ZIP_PATH="$BUILD_DIR/$ZIP_NAME"
 APPCAST="appcast.xml"
 
-echo "==> $VERSION: generating project"
-xcodegen generate --quiet
-
-echo "==> building release"
+echo "==> $VERSION: swift build -c release"
 rm -rf "$BUILD_DIR"
-xcodebuild \
-    -project Reader.xcodeproj \
-    -scheme Reader \
-    -configuration Release \
-    -derivedDataPath "$BUILD_DIR/DerivedData" \
-    CONFIGURATION_BUILD_DIR="$RELEASE_DIR" \
-    MARKETING_VERSION="$VERSION" \
-    CURRENT_PROJECT_VERSION="$VERSION" \
-    build | tail -5
+swift build --disable-sandbox -c release
+BIN_DIR="$(swift build --disable-sandbox -c release --show-bin-path)"
 
-echo "==> zipping $APP_PATH"
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
+echo "==> assembling $APP_DIR"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Frameworks"
+cp "$BIN_DIR/Reader" "$APP_DIR/Contents/MacOS/Reader"
+chmod +x "$APP_DIR/Contents/MacOS/Reader"
+cp -R "$BIN_DIR/Sparkle.framework" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
+
+# Patch Info.plist with the version at release time, then copy in.
+/usr/libexec/PlistBuddy \
+    -c "Set :CFBundleShortVersionString $VERSION" \
+    -c "Set :CFBundleVersion $VERSION" \
+    Resources/Info.plist >/dev/null 2>&1 || true
+cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
+printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
+
+# Ad-hoc sign so Gatekeeper will at least see a signature.
+codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
+
+echo "==> zipping $APP_DIR"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
 
 echo "==> signing with Sparkle"
 SIG_LINE="$(./tools/sign_update "$ZIP_PATH")"
 echo "    $SIG_LINE"
-
-# sign_update prints something like:
-#   sparkle:edSignature="...." length="N"
-#
-# Extract for the appcast entry.
 ED_SIGNATURE="$(echo "$SIG_LINE" | sed -n 's/.*edSignature="\([^"]*\)".*/\1/p')"
 LENGTH="$(echo "$SIG_LINE" | sed -n 's/.*length="\([^"]*\)".*/\1/p')"
 if [ -z "$ED_SIGNATURE" ] || [ -z "$LENGTH" ]; then
-    echo "failed to parse sign_update output"
-    exit 1
+    echo "failed to parse sign_update output"; exit 1
 fi
 
 DATE="$(/bin/date -u +"%a, %d %b %Y %H:%M:%S +0000")"
@@ -99,7 +97,6 @@ $ITEM
 </rss>
 EOF
 else
-    # Insert the new <item> right after <channel>'s opening metadata.
     python3 - "$APPCAST" "$ITEM" <<'PY'
 import sys, re
 path, item = sys.argv[1], sys.argv[2]
