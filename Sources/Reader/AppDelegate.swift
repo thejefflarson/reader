@@ -29,7 +29,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - File handling
 
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {
-        openURL(URL(fileURLWithPath: filename))
+        // Validate the extension before accepting the path. CLI callers bypass
+        // NSOpenPanel's content-type filter, so we must enforce it here to
+        // prevent arbitrary files from being fed to the editor / Recent Documents.
+        let url = URL(fileURLWithPath: filename)
+        let allowedExtensions: Set<String> = ["md", "markdown", "mdown", "mkd", "mkdn"]
+        guard allowedExtensions.contains(url.pathExtension.lowercased()) else { return false }
+        openURL(url)
         return true
     }
 

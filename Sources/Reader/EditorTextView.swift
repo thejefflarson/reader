@@ -283,11 +283,17 @@ final class EditorTextView: NSTextView, NSTextStorageDelegate {
         // For HTML payloads the pasteboard almost always also contains a
         // plain-text representation; we take that path and refuse to
         // parse HTML.
-        if let plain = pboard.string(forType: .string) {
+        // Cap plain-text paste to 1 MB to prevent main-thread stall on restyle().
+        let maxPasteChars = 1 * 1024 * 1024
+        if let plain = pboard.string(forType: .string), plain.count <= maxPasteChars {
             insertText(plain, replacementRange: selectedRange())
             return true
         }
+        // Cap RTF data to 4 MB before handing to NSAttributedString's parser,
+        // which allocates memory proportional to the input inside AppKit.
+        let maxRTFBytes = 4 * 1024 * 1024
         if let data = pboard.data(forType: .rtf),
+           data.count <= maxRTFBytes,
            let attr = NSAttributedString(rtf: data, documentAttributes: nil) {
             insertText(MarkdownSerializer.markdown(from: attr), replacementRange: selectedRange())
             return true

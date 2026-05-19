@@ -4,7 +4,11 @@
      xmlns:dc="http://purl.org/dc/elements/1.1/">
     <channel>
         <title>Reader</title>
-        <link>https://raw.githubusercontent.com/thejefflarson/reader/main/appcast.xml</link>
+        <!-- Feed URL must be hosted outside the source repo so that a push to
+             main cannot immediately serve a malicious update to all users.
+             Deploy appcast.xml to a controlled CDN or GitHub Pages (gh-pages
+             branch with a separate deploy key) and update this URL. -->
+        <link>https://thejefflarson.github.io/reader/appcast.xml</link>
         <description>Reader updates.</description>
         <language>en</language>
                         <item>

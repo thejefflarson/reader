@@ -22,10 +22,20 @@ enum MarkdownSerializer {
 
         var content = text
 
+        // Only embed URLs whose schemes are safe for markdown links written to
+        // disk. RTF clipboard content can carry file://, app://, x-apple-*,
+        // and other schemes that should never be serialised into a .md file.
+        let allowedSchemes: Set<String> = ["http", "https", "mailto"]
         if let url = attributes[.link] as? URL {
+            guard let scheme = url.scheme?.lowercased(), allowedSchemes.contains(scheme) else {
+                return content
+            }
             return "[\(content)](\(url.absoluteString))"
         }
         if let urlString = attributes[.link] as? String, let url = URL(string: urlString) {
+            guard let scheme = url.scheme?.lowercased(), allowedSchemes.contains(scheme) else {
+                return content
+            }
             return "[\(content)](\(url.absoluteString))"
         }
 

@@ -19,6 +19,12 @@ if [ -z "$VERSION" ]; then
     echo "usage: $0 <version> [\"release notes\"]"
     exit 1
 fi
+# Validate version format to prevent shell metacharacters and XML special
+# characters from being injected into Info.plist or appcast.xml.
+if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?(-[A-Za-z0-9]+)?$'; then
+    echo "error: VERSION must match X.Y[.Z][-qualifier] (e.g. 1.2.0), got: $VERSION"
+    exit 1
+fi
 : "${NOTES:=Reader $VERSION}"
 
 REPO="thejefflarson/reader"
@@ -43,14 +49,19 @@ cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 
 # Patch Info.plist with the version at release time, then copy in.
 /usr/libexec/PlistBuddy \
-    -c "Set :CFBundleShortVersionString $VERSION" \
-    -c "Set :CFBundleVersion $VERSION" \
-    Resources/Info.plist >/dev/null 2>&1 || true
+    -c "Set :CFBundleShortVersionString ${VERSION}" \
+    -c "Set :CFBundleVersion ${VERSION}" \
+    Resources/Info.plist
 cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
-# Ad-hoc sign so Gatekeeper will at least see a signature.
-codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
+# Sign with a real Developer ID so Gatekeeper accepts the app without
+# quarantine prompts. Ad-hoc signing (--sign -) produces a binary that
+# is indistinguishable from a tampered copy and is rejected by Gatekeeper
+# on first launch on any machine other than the build machine.
+# Set SIGN_IDENTITY in the environment to override (e.g. for a specific team).
+SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application}"
+codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_DIR"
 
 echo "==> zipping $APP_DIR"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
@@ -67,13 +78,17 @@ fi
 DATE="$(/bin/date -u +"%a, %d %b %Y %H:%M:%S +0000")"
 DOWNLOAD_URL="https://github.com/$REPO/releases/download/v$VERSION/$ZIP_NAME"
 
+# Escape any ]]> sequences in NOTES so they cannot close the CDATA section
+# early and inject arbitrary XML into the appcast served to all users.
+NOTES_SAFE="${NOTES//]]>/]]]]><![CDATA[>}"
+
 ITEM="        <item>
             <title>Version $VERSION</title>
             <pubDate>$DATE</pubDate>
             <sparkle:version>$VERSION</sparkle:version>
             <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[$NOTES]]></description>
+            <description><![CDATA[$NOTES_SAFE]]></description>
             <enclosure
                 url=\"$DOWNLOAD_URL\"
                 length=\"$LENGTH\"
@@ -89,7 +104,7 @@ if [ ! -f "$APPCAST" ]; then
      xmlns:dc="http://purl.org/dc/elements/1.1/">
     <channel>
         <title>Reader</title>
-        <link>https://raw.githubusercontent.com/$REPO/main/appcast.xml</link>
+        <link>https://thejefflarson.github.io/reader/appcast.xml</link>
         <description>Reader updates.</description>
         <language>en</language>
 $ITEM
@@ -101,14 +116,18 @@ else
 import sys, re
 path, item = sys.argv[1], sys.argv[2]
 text = open(path).read()
-text = re.sub(
+# Use re.subn so a structural mismatch (no insertion point found) is a hard
+# error rather than a silent no-op that leaves the appcast unmodified.
+new_text, n = re.subn(
     r"(<channel>.*?</description>\s*<language>[^<]*</language>\s*)",
     lambda m: m.group(1) + item + "\n",
     text,
     count=1,
     flags=re.DOTALL,
 )
-open(path, "w").write(text)
+if n == 0:
+    sys.exit("error: could not locate insertion point in " + path)
+open(path, "w").write(new_text)
 PY
 fi
 

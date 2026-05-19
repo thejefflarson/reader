@@ -190,10 +190,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     func open(url: URL) {
         do {
+            // Reject files larger than 10 MB to prevent an unbounded main-thread
+            // allocation. This also guards against symlinks to /dev/zero or huge
+            // sparse files, which String(contentsOf:) would read indefinitely.
+            let maxFileBytes = 10 * 1024 * 1024
+            let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+            if let size = attrs[.size] as? Int, size > maxFileBytes {
+                throw CocoaError(.fileReadTooLarge)
+            }
             let content = try String(contentsOf: url, encoding: .utf8)
             currentFileURL = url
             markdown = content
-            NSDocumentController.shared.noteNewRecentDocumentURL(url)
+            // Only record markdown files in Recent Documents; arbitrary paths
+            // (e.g. CLI-supplied /etc/passwd) must not appear in the system list.
+            let allowedExtensions: Set<String> = ["md", "markdown", "mdown", "mkd", "mkdn"]
+            if allowedExtensions.contains(url.pathExtension.lowercased()) {
+                NSDocumentController.shared.noteNewRecentDocumentURL(url)
+            }
             // Opened documents land in preview mode — a file you received
             // is something you read first, not something you're drafting.
             // New blank windows (⌘N) stay in edit mode.

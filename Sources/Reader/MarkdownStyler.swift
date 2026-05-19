@@ -23,6 +23,11 @@ final class MarkdownStyler {
     func restyle(_ storage: NSTextStorage) {
         let full = NSRange(location: 0, length: storage.length)
         guard full.length > 0 else { return }
+        // Refuse to run all regex rules synchronously on very large documents —
+        // that can produce a multi-second main-thread stall (and is the first
+        // link in the ReDoS chain). 1 MB is well above any realistic note size.
+        let maxStyleBytes = 1 * 1024 * 1024
+        guard storage.length <= maxStyleBytes else { return }
 
         storage.setAttributes(baseAttributes(), range: full)
         let occupied = NSMutableIndexSet()
@@ -253,7 +258,9 @@ final class MarkdownStyler {
     private static func setextHeading2() -> Rule {
         // `Title\n---` — but only if the title line isn't itself a list
         // bullet or blockquote (which would fight this interpretation).
-        let pattern = regex("(?m)^([^\\n]+)\\n(-{2,})\\s*$")
+        // Use [ \t]* instead of \s* to avoid O(n²) backtracking on lines
+        // ending with many hyphens that are not followed by a newline.
+        let pattern = regex("(?m)^([^\\n]+)\\n(-{2,})[ \\t]*$")
         return Rule(pattern: pattern, occupies: false) { match, ctx in
             let titleLine = match.range(at: 1)
             let titleText = (ctx.storage.string as NSString).substring(with: titleLine)
@@ -348,7 +355,11 @@ final class MarkdownStyler {
         // Match any line that looks like a table row: starts and ends with
         // `|`, has at least one interior `|`. Cells are monospace so columns
         // align visually in the source-is-rendered model.
-        let pattern = regex("(?m)^(\\s*\\|.+\\|)\\s*$")
+        //
+        // Pattern uses (?:\|[^|\n]+)+ instead of .+ to eliminate O(n²)
+        // backtracking: each cell is unambiguously "|<non-pipe chars>",
+        // so the engine can never re-split a match when the trailing | is absent.
+        let pattern = regex("(?m)^([ \\t]*(?:\\|[^|\\n]+)+\\|)[ \\t]*$")
         return Rule(pattern: pattern, occupies: false) { match, ctx in
             let whole = match.range
             ctx.storage.addAttribute(.font, value: Theme.codeFont, range: whole)
@@ -376,9 +387,13 @@ final class MarkdownStyler {
     // MARK: - Inline emphasis
 
     private static func bold() -> Rule {
+        // Do NOT use .dotMatchesLineSeparators here: with that flag and an
+        // unclosed ** marker, the lazy .+? expands to span the entire document,
+        // causing catastrophic backtracking on every keystroke. Constraining
+        // to [^\n] limits each match to a single line, making the rule O(n).
         let pattern = try! NSRegularExpression(
-            pattern: "(\\*\\*|__)(?=\\S)(.+?)(?<=\\S)\\1",
-            options: [.dotMatchesLineSeparators]
+            pattern: "(\\*\\*|__)(?=\\S)([^\\n]+?)(?<=\\S)\\1",
+            options: []
         )
         return Rule(pattern: pattern, occupies: false) { match, ctx in
             let whole = match.range
