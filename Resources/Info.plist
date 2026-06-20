@@ -64,10 +64,19 @@
 	<true/>
 	<key>SUEnableInstallerLauncherService</key>
 	<true/>
+	<!-- Feed must be hosted outside the source repo; see supply-chain finding. -->
 	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/thejefflarson/reader/main/appcast.xml</string>
+	<string>https://thejefflarson.github.io/reader/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>zBk/+O7F6ZvuCdEM7p7FQ3VHdkOFkRbJhMbZGRjqP3U=</string>
+	<!-- Explicitly enforce HTTPS-only for all URLSession connections so future
+	     code cannot accidentally use cleartext HTTP. This matches the system
+	     default on modern macOS but makes the policy explicit and auditable. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+	</dict>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>

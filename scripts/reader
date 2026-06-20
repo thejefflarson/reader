@@ -35,6 +35,17 @@ for arg in "$@"; do
         echo "reader: $arg: no such file" >&2
         exit 1
     fi
+    # Validate the file extension before forwarding to Launch Services.
+    # Any existing file would otherwise be opened by Reader, bypassing the
+    # content-type filter that NSOpenPanel enforces for interactive opens.
+    ext="${arg##*.}"
+    case "$ext" in
+        md|markdown|mdown|mkd|mkdn) ;;
+        *)
+            echo "reader: $arg: not a supported markdown file (.$ext)" >&2
+            exit 1
+            ;;
+    esac
     abs="$(/usr/bin/dirname "$arg")"
     abs="$(cd "$abs" && pwd)/$(/usr/bin/basename "$arg")"
     absolute_paths="$absolute_paths
