@@ -3,7 +3,8 @@ import SwiftUI
 
 /// A SwiftUI rendering of a markdown table. Headers in bold, body rows in
 /// plain prose; subtle separator between header and body, a quiet hairline
-/// border around the whole grid. Sizes to its content.
+/// border around the whole grid. Fills the available text-column width;
+/// cells share that width equally and wrap their text as needed.
 struct MarkdownTableView: View {
     let headers: [String]
     let rows: [[String]]
@@ -12,7 +13,10 @@ struct MarkdownTableView: View {
         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
             GridRow {
                 ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
-                    Text(h).font(.headline)
+                    Text(h)
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Divider().gridCellColumns(max(headers.count, 1))
@@ -20,11 +24,14 @@ struct MarkdownTableView: View {
                 GridRow {
                     ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
                         Text(cell)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(
@@ -99,7 +106,13 @@ final class MarkdownTableViewProvider: NSTextAttachmentViewProvider {
         position: CGPoint
     ) -> CGRect {
         guard let view = view else { return .zero }
-        let fitting = view.fittingSize
-        return CGRect(origin: .zero, size: fitting)
+        // Fill the text column. Cells share the width equally and wrap
+        // their text as needed; the SwiftUI hosting view reports its
+        // wanted height for that fixed width via `fittingSize`.
+        let width = max(0, textContainer?.size.width ?? proposedLineFragment.width)
+        view.frame = NSRect(x: 0, y: 0, width: width, height: 10_000)
+        view.layoutSubtreeIfNeeded()
+        let height = view.fittingSize.height
+        return CGRect(x: 0, y: 0, width: width, height: height)
     }
 }
