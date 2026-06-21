@@ -1,5 +1,6 @@
 import AppKit
 import Sparkle
+import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controllers: [MainWindowController] = []
@@ -16,10 +17,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         _ = updaterController        // start the background update checker
+        offerDefaultHandlerIfFirstLaunch()
     }
 
     @objc func checkForUpdates(_ sender: Any?) {
         updaterController.checkForUpdates(sender)
+    }
+
+    /// Prompt the user to symlink the bundled `reader` CLI script into a
+    /// directory on PATH. We try the standard locations that don't require
+    /// admin privileges before falling back to asking.
+    @objc func installCommandLineTool(_ sender: Any?) {
+        let fm = FileManager.default
+        guard let bundled = Bundle.main.url(forResource: "reader", withExtension: nil) else {
+            showAlert("The `reader` script is missing from this build of the app.",
+                      informative: "Rebuild with `./scripts/build-app.sh` and try again.")
+            return
+        }
+
+        let home = fm.homeDirectoryForCurrentUser
+        let candidates = [
+            URL(fileURLWithPath: "/usr/local/bin"),
+            home.appendingPathComponent(".local/bin"),
+            home.appendingPathComponent("bin"),
+        ]
+        for dir in candidates {
+            guard fm.isWritableFile(atPath: dir.path) else { continue }
+            let target = dir.appendingPathComponent("reader")
+            try? fm.removeItem(at: target)
+            do {
+                try fm.createSymbolicLink(at: target, withDestinationURL: bundled)
+                showAlert("Installed `reader` at \(target.path)",
+                          informative: "Run `reader path/to/file.md` from any shell to open a markdown file in Reader. If `\(target.path)` isn't on your PATH, add it to your shell profile.")
+                return
+            } catch {
+                continue
+            }
+        }
+
+        // Nothing writable — hand the user the source path so they can place it themselves.
+        showAlert("Couldn't find a writable install location.",
+                  informative: "Symlink this script to any directory on your PATH:\n\n\(bundled.path)")
+    }
+
+    private func showAlert(_ message: String, informative: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = informative
+        alert.runModal()
+    }
+
+    // MARK: - Default markdown handler
+
+    /// The UTType the system uses for `.md` and friends. Files declared in
+    /// `Info.plist`'s `UTImportedTypeDeclarations` resolve through this.
+    private static let markdownUTI = "net.daringfireball.markdown"
+
+    /// True when this build of Reader is the user's current default opener
+    /// for markdown documents. Returns false on the simulator and on systems
+    /// where no handler is registered yet.
+    private func isDefaultMarkdownHandler() -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier,
+              let handler = LSCopyDefaultRoleHandlerForContentType(
+                Self.markdownUTI as CFString, .editor
+              )?.takeRetainedValue() as String?
+        else { return false }
+        return handler.caseInsensitiveCompare(bundleID) == .orderedSame
+    }
+
+    @objc func setAsDefaultMarkdownApp(_ sender: Any?) {
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            showAlert("Reader has no bundle identifier.",
+                      informative: "This is an unsigned development build — install Reader.app to /Applications first.")
+            return
+        }
+        let status = LSSetDefaultRoleHandlerForContentType(
+            Self.markdownUTI as CFString,
+            .editor,
+            bundleID as CFString
+        )
+        if status == noErr {
+            showAlert("Reader is now the default markdown app.",
+                      informative: "Double-clicking a `.md` file in Finder will open it in Reader.")
+        } else {
+            showAlert("Couldn't set Reader as the default markdown app.",
+                      informative: "Launch Services returned status \(status). Try setting it manually: right-click a `.md` file in Finder → Get Info → Open With → Reader → Change All…")
+        }
+    }
+
+    /// On the very first launch (per-user), if Reader isn't already the
+    /// default markdown handler, offer to make it so. The user's answer is
+    /// remembered — we never nag a second time.
+    private func offerDefaultHandlerIfFirstLaunch() {
+        let key = "ReaderDidOfferDefaultHandler"
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: key) else { return }
+        defaults.set(true, forKey: key)
+
+        // Skip if we're already the handler (e.g. user previously set it
+        // manually, or this is a re-install).
+        guard !isDefaultMarkdownHandler() else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Open `.md` files in Reader by default?"
+        alert.informativeText = "Reader can register as your default markdown editor so double-clicking any `.md` file opens it here. You can change this any time from the Reader menu."
+        alert.addButton(withTitle: "Make Default")
+        alert.addButton(withTitle: "Not Now")
+        if alert.runModal() == .alertFirstButtonReturn {
+            setAsDefaultMarkdownApp(nil)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -118,6 +224,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "About Reader", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Set as Default Markdown App", action: #selector(setAsDefaultMarkdownApp(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Install Command Line Tool…", action: #selector(installCommandLineTool(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Reader", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")

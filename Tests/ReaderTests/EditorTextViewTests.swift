@@ -8,8 +8,10 @@ import AppKit
 /// an NSApplication event loop.
 final class MarkdownPreviewTests: XCTestCase {
     func testHeadingMarkersStripped() {
+        // Preview also collapses blank-line paragraph breaks (`\n\n` → `\n`)
+        // and relies on paragraph-spacing in the paragraph style for the gap.
         let rendered = MarkdownPreview.render("# Heading\n\nBody.")
-        XCTAssertEqual(rendered.string, "Heading\n\nBody.")
+        XCTAssertEqual(rendered.string, "Heading\nBody.")
     }
 
     func testBoldMarkersStripped() {
@@ -40,7 +42,7 @@ final class MarkdownPreviewTests: XCTestCase {
     func testMixedMarkdownPreview() {
         let source = "## Section\n\n**bold** and *italic* with `code`."
         let rendered = MarkdownPreview.render(source)
-        XCTAssertEqual(rendered.string, "Section\n\nbold and italic with code.")
+        XCTAssertEqual(rendered.string, "Section\nbold and italic with code.")
     }
 
     func testPlainTextPassesThrough() {

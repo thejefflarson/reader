@@ -154,12 +154,16 @@ final class MarkdownFeaturesTests: XCTestCase {
         XCTAssertTrue(font!.fontDescriptor.symbolicTraits.contains(.monoSpace))
     }
 
-    func testTablePipeIsSyntaxMarker() {
-        let source = "| a | b |"
+    func testTablePipeIsDimmed() {
+        // Pipes are dimmed in edit mode (not flagged `.isMarkdownSyntax` —
+        // preview rebuilds tables programmatically with box-drawing rather
+        // than stripping pipes inline). Requires a complete GFM table
+        // (header + separator + body row).
+        let source = "| a | b |\n| - | - |\n| 1 | 2 |\n"
         let storage = styled(source)
         let pipeIdx = (source as NSString).range(of: "|").location
-        let isSyntax = storage.attribute(.isMarkdownSyntax, at: pipeIdx, effectiveRange: nil) as? Bool
-        XCTAssertEqual(isSyntax, true)
+        let color = storage.attribute(.foregroundColor, at: pipeIdx, effectiveRange: nil) as? NSColor
+        XCTAssertEqual(color, Theme.syntaxColor)
     }
 
     // MARK: - URL scheme allowlist (security)

@@ -2,46 +2,62 @@ import AppKit
 
 extension NSAttributedString.Key {
     /// Marks a character range as part of a block-level code region
-    /// (fenced or indented). `CodeBlockLayoutManager` uses this to draw
+    /// (fenced or indented). `CodeBlockLayoutFragment` uses this to draw
     /// the background as a full line-fragment-wide rectangle instead of
-    /// the tight glyph hull NSLayoutManager would draw otherwise.
+    /// the tight glyph hull NSTextLayoutManager would draw otherwise.
     static let isCodeBlock = NSAttributedString.Key("readerCodeBlock")
 }
 
-/// Paints the `codeBackground` rectangle across the full line fragment
-/// for any range flagged `.isCodeBlock`, so code blocks read as a solid
-/// band rather than a ragged shape following each line's glyph width.
+/// TextKit 2 equivalent of the old `CodeBlockLayoutManager`. Subclasses
+/// `NSTextLayoutFragment` to draw the `codeBackground` rectangle across
+/// the full line-fragment width for any fragment whose first character is
+/// flagged `.isCodeBlock`. Non-code fragments fall through to the default
+/// implementation.
 ///
-/// Non-code backgrounds fall through to the default implementation.
-final class CodeBlockLayoutManager: NSLayoutManager {
-    override func fillBackgroundRectArray(
-        _ rectArray: UnsafePointer<NSRect>,
-        count rectCount: Int,
-        forCharacterRange charRange: NSRange,
-        color: NSColor
-    ) {
-        guard let storage = textStorage,
-              charRange.location < storage.length,
-              let flag = storage.attribute(.isCodeBlock, at: charRange.location, effectiveRange: nil) as? Bool,
-              flag == true
-        else {
-            super.fillBackgroundRectArray(
-                rectArray,
-                count: rectCount,
-                forCharacterRange: charRange,
-                color: color
-            )
-            return
+/// `MainWindowController` returns this class from its layout-manager
+/// delegate so every fragment that lays out code-block characters gets
+/// the full-width band.
+final class CodeBlockLayoutFragment: NSTextLayoutFragment {
+    override func draw(at point: CGPoint, in context: CGContext) {
+        if isCodeBlock {
+            context.saveGState()
+            context.setFillColor(Theme.codeBackground.cgColor)
+            // `layoutFragmentFrame` is in container coordinates; subtract
+            // the fragment origin to translate into the rect we're asked
+            // to draw at.
+            let frame = layoutFragmentFrame
+            let containerWidth = textLayoutManager?.textContainer?.size.width ?? frame.width
+            context.fill(CGRect(
+                x: point.x,
+                y: point.y,
+                width: containerWidth,
+                height: frame.height
+            ))
+            context.restoreGState()
         }
+        super.draw(at: point, in: context)
+    }
 
-        color.setFill()
-        let glyphRange = self.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
-        var glyph = glyphRange.location
-        while glyph < NSMaxRange(glyphRange) {
-            var effective = NSRange()
-            let lineRect = lineFragmentRect(forGlyphAt: glyph, effectiveRange: &effective)
-            NSBezierPath(rect: lineRect).fill()
-            glyph = NSMaxRange(effective)
-        }
+    private var isCodeBlock: Bool {
+        guard let elementRange = textElement?.elementRange,
+              let manager = textLayoutManager,
+              let contentStorage = manager.textContentManager as? NSTextContentStorage,
+              let storage = contentStorage.textStorage,
+              let nsRange = contentStorage.nsRange(for: elementRange),
+              nsRange.location < storage.length
+        else { return false }
+        let flag = storage.attribute(
+            .isCodeBlock, at: nsRange.location, effectiveRange: nil
+        ) as? Bool
+        return flag == true
+    }
+}
+
+private extension NSTextContentStorage {
+    func nsRange(for textRange: NSTextRange) -> NSRange? {
+        let start = offset(from: documentRange.location, to: textRange.location)
+        let length = offset(from: textRange.location, to: textRange.endLocation)
+        guard start >= 0, length >= 0 else { return nil }
+        return NSRange(location: start, length: length)
     }
 }

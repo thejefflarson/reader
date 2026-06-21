@@ -1,46 +1,54 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build Reader.app via xcodegen + xcodebuild.
+# Build Reader.app locally via `swift build` and manual bundle assembly.
+# Xcode's SPM resolver is sandboxed in some environments and fails; the
+# SwiftPM CLI works reliably.
 #
 # Usage:
 #   ./scripts/build-app.sh            # release build -> build/Release/Reader.app
-#   ./scripts/build-app.sh --install  # also copy to /Applications and register
-#   ./scripts/build-app.sh --debug
+#   ./scripts/build-app.sh --debug    # debug build   -> build/Debug/Reader.app
+#   ./scripts/build-app.sh --install  # after release build, copy to /Applications
+#                                     #   and register with Launch Services
 
 cd "$(dirname "$0")/.."
 
-CONFIG="Release"
+CONFIG="release"
+CONFIG_DIR="Release"
 INSTALL=false
 for arg in "$@"; do
     case "$arg" in
-        --debug) CONFIG="Debug" ;;
+        --debug) CONFIG="debug"; CONFIG_DIR="Debug" ;;
         --install) INSTALL=true ;;
         *) echo "unknown flag: $arg"; exit 1 ;;
     esac
 done
 
-if ! command -v xcodegen >/dev/null 2>&1; then
-    echo "xcodegen is required. Install with: brew install xcodegen"
-    exit 1
-fi
-
-echo "==> generating Xcode project"
-xcodegen generate --quiet
-
 BUILD_DIR="$(pwd)/build"
-rm -rf "$BUILD_DIR"
+OUT_DIR="$BUILD_DIR/$CONFIG_DIR"
+APP="$OUT_DIR/Reader.app"
 
-echo "==> xcodebuild -configuration $CONFIG"
-xcodebuild \
-    -project Reader.xcodeproj \
-    -scheme Reader \
-    -configuration "$CONFIG" \
-    -derivedDataPath "$BUILD_DIR/DerivedData" \
-    CONFIGURATION_BUILD_DIR="$BUILD_DIR/$CONFIG" \
-    build | tail -20
+echo "==> swift build -c $CONFIG"
+rm -rf "$OUT_DIR"
+swift build --disable-sandbox -c "$CONFIG"
+BIN_DIR="$(swift build --disable-sandbox -c "$CONFIG" --show-bin-path)"
 
-APP="$BUILD_DIR/$CONFIG/Reader.app"
+echo "==> assembling $APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+cp "$BIN_DIR/Reader" "$APP/Contents/MacOS/Reader"
+chmod +x "$APP/Contents/MacOS/Reader"
+cp -R "$BIN_DIR/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+# `swift build` doesn't know we're producing a .app bundle, so it doesn't
+# add an rpath pointing at Contents/Frameworks. Sparkle's install name is
+# `@rpath/Sparkle.framework/...` — without this rpath, dyld can't find it
+# at launch.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Reader" 2>/dev/null || true
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+install -m 0755 scripts/reader "$APP/Contents/Resources/reader"
+cp Resources/Info.plist "$APP/Contents/Info.plist"
+printf 'APPL????' > "$APP/Contents/PkgInfo"
+codesign --force --deep --sign - "$APP" 2>/dev/null || true
+
 echo "==> built $APP"
 
 if [ "$INSTALL" = true ]; then

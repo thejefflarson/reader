@@ -1,10 +1,13 @@
 import AppKit
 
-/// Notification posted whenever the editor finishes applying styles, so
-/// chrome (status bar, window title) can react to word count / dirty state.
+/// Notifications posted by the editor. `editorTextDidChange` fires only on
+/// genuine content edits (typing, paste, list continuation) — *not* on
+/// preview toggles, which mutate the storage but don't change the document.
+/// `editorPreviewModeDidChange` fires when preview is entered or exited.
 extension Notification.Name {
     static let editorTextDidChange = Notification.Name("editorTextDidChange")
     static let editorSelectionDidChange = Notification.Name("editorSelectionDidChange")
+    static let editorPreviewModeDidChange = Notification.Name("editorPreviewModeDidChange")
 }
 
 /// What markdown formats the caret currently sits inside.
@@ -21,11 +24,35 @@ struct EditorFormatState: Equatable {
 /// The WYSIWYG markdown editor. The underlying string is always pure
 /// markdown — styling is layered on as attributes so copy/paste produces
 /// the exact markdown source with zero round-trip loss.
+///
+/// The class is intentionally narrow: input pipeline (smart substitutions
+/// and paste), restyling on mutation, selection-change forwarding. The
+/// thicker concerns live in focused extensions:
+///   - `EditorTextView+Preview.swift` — enter/exit preview mode.
+///   - `EditorTextView+Formatting.swift` — bold/italic/heading/list/quote
+///     toggles and the smart-newline list continuation.
+///   - `EditorTextView+FormatState.swift` — caret-aware format detection
+///     for the bottom-bar buttons.
 final class EditorTextView: NSTextView, NSTextStorageDelegate {
-    private let styler = MarkdownStyler()
-    private var isRestyling = false
+    /// Shared with the preview extension to call `baseAttributes()` when
+    /// resetting typing attributes after a round trip.
+    let styler = MarkdownStyler()
+
+    /// Re-entrance guard for the text-storage delegate. Direct storage
+    /// mutations (preview swap, restyle) flip this so the delegate doesn't
+    /// re-run the styler against its own output.
+    var isRestyling = false
+
+    /// Set when preview mode is active. The string IS the rendered text;
+    /// `sourceBeforePreview` carries the original markdown for round-trip.
+    var sourceBeforePreview: String?
+
+    /// Caret position in the *source* at the moment preview was entered.
+    /// Restored on exit so the user lands back where they were drafting, not
+    /// at whatever offset they clicked while reading the preview.
+    var sourceCursorBeforePreview = 0
+
     private var isSubstituting = false
-    private var sourceBeforePreview: String?
 
     var isPreviewing: Bool { sourceBeforePreview != nil }
 
@@ -114,42 +141,7 @@ final class EditorTextView: NSTextView, NSTextStorageDelegate {
         isRestyling = false
     }
 
-    // MARK: - Preview mode
-
-    /// Toggle between editing (markdown source visible) and preview (markers
-    /// hidden, read-only). The original markdown is preserved; exit restores
-    /// it verbatim.
-    @objc func togglePreview(_ sender: Any?) {
-        if isPreviewing { exitPreview() } else { enterPreview() }
-    }
-
-    func enterPreview() {
-        guard !isPreviewing, let storage = textStorage else { return }
-        let source = storage.string
-        sourceBeforePreview = source
-        isRestyling = true
-        storage.setAttributedString(MarkdownPreview.render(source))
-        isRestyling = false
-        // Preview text is shorter than source (markers stripped) — any
-        // selection that lived past the new end would throw NSRangeException
-        // the moment anything tried to line-range the cursor.
-        setSelectedRange(NSRange(location: min(selectedRange().location, storage.length), length: 0))
-        isEditable = false
-        isSelectable = true
-        NotificationCenter.default.post(name: .editorTextDidChange, object: self)
-    }
-
-    func exitPreview() {
-        guard let source = sourceBeforePreview, let storage = textStorage else { return }
-        sourceBeforePreview = nil
-        isRestyling = true
-        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: source)
-        isRestyling = false
-        setSelectedRange(NSRange(location: min(selectedRange().location, storage.length), length: 0))
-        isEditable = true
-        reapplyStyling()
-        NotificationCenter.default.post(name: .editorTextDidChange, object: self)
-    }
+    // MARK: - Selection forwarding
 
     override func setSelectedRange(
         _ charRange: NSRange,
@@ -160,69 +152,6 @@ final class EditorTextView: NSTextView, NSTextStorageDelegate {
         if !stillSelecting {
             NotificationCenter.default.post(name: .editorSelectionDidChange, object: self)
         }
-    }
-
-    /// Computes which markdown formats surround the current caret position
-    /// (or selection). The bottom bar uses this to burn active controls red.
-    ///
-    /// Block-level state (heading, list, quote) comes from the line prefix.
-    /// Inline state (bold, italic, code, link) comes from counting unbalanced
-    /// markdown markers in the line up to the cursor — *not* from font traits,
-    /// since a heading line is already drawn bold by its own styling and that
-    /// should not light up the Bold toggle.
-    func currentFormatState() -> EditorFormatState {
-        guard let storage = textStorage, storage.length > 0 else {
-            return EditorFormatState()
-        }
-        let length = storage.length
-        let cursor = max(0, min(selectedRange().location, length))
-        let ns = storage.string as NSString
-
-        let lineRange = ns.lineRange(for: NSRange(location: cursor, length: 0))
-        let line = ns.substring(with: lineRange)
-        let cursorInLine = min(cursor - lineRange.location, (line as NSString).length)
-        let prefix = (line as NSString).substring(to: cursorInLine)
-
-        var state = EditorFormatState()
-        state.heading = line.range(of: "^#{1,6}\\s+", options: .regularExpression) != nil
-        state.list = line.range(of: "^\\s*([-*+]|\\d+\\.)\\s+", options: .regularExpression) != nil
-        state.quote = line.hasPrefix("> ") || line.hasPrefix(">")
-
-        // Count un-escaped markers before cursor. Odd = cursor is inside a run.
-        // For italic we match single `*`/`_` that are NOT part of `**`/`__`.
-        state.bold = hasUnbalanced(marker: "**", in: prefix)
-            || hasUnbalanced(marker: "__", in: prefix)
-        state.italic = hasUnbalancedSingle(marker: "*", in: prefix)
-            || hasUnbalancedSingle(marker: "_", in: prefix)
-        state.code = hasUnbalanced(marker: "`", in: prefix)
-
-        let probe = cursor == 0 ? 0 : min(cursor - 1, length - 1)
-        state.link = storage.attribute(.link, at: probe, effectiveRange: nil) != nil
-        return state
-    }
-
-    private func hasUnbalanced(marker: String, in text: String) -> Bool {
-        guard !marker.isEmpty else { return false }
-        let count = text.components(separatedBy: marker).count - 1
-        return count % 2 == 1
-    }
-
-    private func hasUnbalancedSingle(marker: Character, in text: String) -> Bool {
-        // Count lone `*` or `_`, skipping doubled occurrences (those are bold).
-        var i = text.startIndex
-        var count = 0
-        while i < text.endIndex {
-            if text[i] == marker {
-                let next = text.index(after: i)
-                if next < text.endIndex, text[next] == marker {
-                    i = text.index(after: next)   // skip the pair
-                    continue
-                }
-                count += 1
-            }
-            i = text.index(after: i)
-        }
-        return count % 2 == 1
     }
 
     // MARK: - Smart substitutions
@@ -301,157 +230,17 @@ final class EditorTextView: NSTextView, NSTextStorageDelegate {
         return super.readSelection(from: pboard)
     }
 
-    // MARK: - Formatting shortcuts
-
-    @objc func toggleBold(_ sender: Any?) { wrapSelection(with: "**") }
-    @objc func toggleItalic(_ sender: Any?) { wrapSelection(with: "*") }
-    @objc func toggleStrike(_ sender: Any?) { wrapSelection(with: "~~") }
-    @objc func toggleCode(_ sender: Any?) { wrapSelection(with: "`") }
-
-    @objc func insertLink(_ sender: Any?) {
-        let range = safeRange(selectedRange())
-        let selected = (string as NSString).substring(with: range)
-        let label = selected.isEmpty ? "text" : selected
-        let replacement = "[\(label)](url)"
-        insertText(replacement, replacementRange: range)
-        // Select "url" so user can paste immediately
-        let offset = range.location + label.count + 3 // len("[") + label + "]("
-        setSelectedRange(NSRange(location: offset, length: 3))
-    }
-
-    @objc func applyHeading1(_ sender: Any?) { setHeading(level: 1) }
-    @objc func applyHeading2(_ sender: Any?) { setHeading(level: 2) }
-    @objc func applyHeading3(_ sender: Any?) { setHeading(level: 3) }
-    @objc func applyHeading0(_ sender: Any?) { setHeading(level: 0) }
-
-    @objc func toggleUnorderedList(_ sender: Any?) { togglePrefix("- ") }
-    @objc func toggleBlockquote(_ sender: Any?) { togglePrefix("> ") }
+    // MARK: - Range helpers
 
     /// Clamp a range to the text storage's current bounds. NSString's
     /// line/substring methods raise NSRangeException the moment location
     /// exceeds `length`, which can happen transiently if selection state
     /// outlives a storage-shrinking edit.
-    private func safeRange(_ range: NSRange) -> NSRange {
+    func safeRange(_ range: NSRange) -> NSRange {
         let length = textStorage?.length ?? 0
         let loc = max(0, min(range.location, length))
         let remaining = length - loc
         let len = max(0, min(range.length, remaining))
         return NSRange(location: loc, length: len)
-    }
-
-    private func wrapSelection(with marker: String) {
-        let range = safeRange(selectedRange())
-        let ns = string as NSString
-        if range.length == 0 {
-            let insert = marker + marker
-            insertText(insert, replacementRange: range)
-            setSelectedRange(NSRange(location: range.location + marker.count, length: 0))
-            return
-        }
-        let selected = ns.substring(with: range)
-        let markerLen = marker.count
-        if selected.hasPrefix(marker) && selected.hasSuffix(marker) && selected.count >= 2 * markerLen {
-            let stripped = String(selected.dropFirst(markerLen).dropLast(markerLen))
-            insertText(stripped, replacementRange: range)
-            setSelectedRange(NSRange(location: range.location, length: (stripped as NSString).length))
-        } else {
-            let wrapped = marker + selected + marker
-            insertText(wrapped, replacementRange: range)
-            setSelectedRange(NSRange(location: range.location + markerLen, length: (selected as NSString).length))
-        }
-    }
-
-    private func setHeading(level: Int) {
-        let ns = string as NSString
-        let lineRange = ns.lineRange(for: safeRange(selectedRange()))
-        var line = ns.substring(with: lineRange)
-        // strip trailing newline
-        var trailingNewline = ""
-        if line.hasSuffix("\n") {
-            trailingNewline = "\n"
-            line = String(line.dropLast())
-        }
-        // remove existing heading marker
-        let trimmed = line.replacingOccurrences(
-            of: "^#{1,6}\\s+",
-            with: "",
-            options: .regularExpression
-        )
-        let replacement: String
-        if level == 0 {
-            replacement = trimmed + trailingNewline
-        } else {
-            let hashes = String(repeating: "#", count: level)
-            replacement = "\(hashes) \(trimmed)\(trailingNewline)"
-        }
-        insertText(replacement, replacementRange: lineRange)
-    }
-
-    private func togglePrefix(_ prefix: String) {
-        let ns = string as NSString
-        let range = safeRange(selectedRange())
-        let lineRange = ns.lineRange(for: range)
-        var line = ns.substring(with: lineRange)
-        var trailingNewline = ""
-        if line.hasSuffix("\n") {
-            trailingNewline = "\n"
-            line = String(line.dropLast())
-        }
-        let replacement: String
-        if line.hasPrefix(prefix) {
-            replacement = String(line.dropFirst(prefix.count)) + trailingNewline
-        } else {
-            replacement = prefix + line + trailingNewline
-        }
-        insertText(replacement, replacementRange: lineRange)
-    }
-
-    // MARK: - Smart newline (continue lists & blockquotes)
-
-    override func insertNewline(_ sender: Any?) {
-        let ns = string as NSString
-        let caret = safeRange(selectedRange()).location
-        let lineStart = ns.lineRange(for: NSRange(location: caret, length: 0)).location
-        let currentLine = ns.substring(with: NSRange(location: lineStart, length: caret - lineStart))
-
-        if let continuation = listContinuation(for: currentLine) {
-            // Empty list item? Break out of list.
-            if currentLine.trimmingCharacters(in: .whitespaces) == continuation.trimmingCharacters(in: .whitespaces) {
-                let lineRange = NSRange(location: lineStart, length: caret - lineStart)
-                insertText("\n", replacementRange: lineRange)
-                return
-            }
-            super.insertNewline(sender)
-            insertText(continuation, replacementRange: selectedRange())
-            return
-        }
-        super.insertNewline(sender)
-    }
-
-    /// Returns the list/quote prefix that should be inserted on the next line,
-    /// or nil if the current line doesn't warrant continuation.
-    private func listContinuation(for line: String) -> String? {
-        let patterns: [(String, (String) -> String)] = [
-            ("^(\\s*)([-*+])\\s+", { match in "\(match)" }),
-            ("^(\\s*)(\\d+)\\.\\s+", { _ in "" }),
-            ("^(\\s*)>\\s*", { match in match }),
-        ]
-        for (pattern, _) in patterns {
-            if let range = line.range(of: pattern, options: .regularExpression) {
-                var prefix = String(line[range])
-                if pattern.contains("\\d+") {
-                    // increment ordered list number
-                    let regex = try? NSRegularExpression(pattern: "^(\\s*)(\\d+)(\\.\\s+)")
-                    if let match = regex?.firstMatch(in: prefix, range: NSRange(location: 0, length: (prefix as NSString).length)) {
-                        let indent = (prefix as NSString).substring(with: match.range(at: 1))
-                        let n = Int((prefix as NSString).substring(with: match.range(at: 2))) ?? 1
-                        let tail = (prefix as NSString).substring(with: match.range(at: 3))
-                        prefix = "\(indent)\(n + 1)\(tail)"
-                    }
-                }
-                return prefix
-            }
-        }
-        return nil
     }
 }

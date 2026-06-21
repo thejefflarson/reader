@@ -5,7 +5,9 @@ import AppKit
 /// Kept intentionally spare: one unified window, no sidebar, no preview
 /// pane, no top toolbar — the editor *is* the preview, and the eye sees
 /// only text. The bottom dock carries every control and every readout.
-final class MainWindowController: NSWindowController, NSWindowDelegate {
+final class MainWindowController: NSWindowController, NSWindowDelegate,
+    NSTextLayoutManagerDelegate
+{
     private let editor: EditorTextView
     private let bottomBar = BottomBar()
     private let scrollView: NSScrollView
@@ -13,6 +15,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var isDirty = false
     private var observer: NSObjectProtocol?
     private var selectionObserver: NSObjectProtocol?
+    private var previewObserver: NSObjectProtocol?
 
     init() {
         let window = NSWindow(
@@ -50,10 +53,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         container.heightTracksTextView = false
         container.lineFragmentPadding = 0
 
-        let layoutManager = CodeBlockLayoutManager()
-        layoutManager.addTextContainer(container)
-        let storage = NSTextStorage()
-        storage.addLayoutManager(layoutManager)
+        // TextKit 2 stack: NSTextContentStorage wraps NSTextStorage and
+        // bridges it to NSTextLayoutManager. Required for live SwiftUI
+        // view attachments (NSTextAttachmentViewProvider is consulted
+        // only in TextKit 2).
+        let layoutManager = NSTextLayoutManager()
+        layoutManager.textContainer = container
+        let contentStorage = NSTextContentStorage()
+        contentStorage.addTextLayoutManager(layoutManager)
 
         let textView = EditorTextView(frame: .zero, textContainer: container)
         textView.minSize = NSSize(width: 0, height: 0)
@@ -72,6 +79,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         super.init(window: window)
         window.delegate = self
+        layoutManager.delegate = self
 
         assembleContent()
         centerEditorContainer()
@@ -90,6 +98,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         ) { [weak self] _ in
             self?.updateActiveFormats()
         }
+        previewObserver = NotificationCenter.default.addObserver(
+            forName: .editorPreviewModeDidChange,
+            object: textView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.didTogglePreview()
+        }
 
         bottomBar.update(for: "", documentName: nil)
         window.makeFirstResponder(textView)
@@ -100,6 +115,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     deinit {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver) }
+        if let previewObserver { NotificationCenter.default.removeObserver(previewObserver) }
+    }
+
+    // MARK: - NSTextLayoutManagerDelegate
+
+    /// Every fragment laid out by the manager comes through here. We hand
+    /// back `CodeBlockLayoutFragment` so any fragment whose first
+    /// character is flagged `.isCodeBlock` paints the full-width band.
+    func textLayoutManager(
+        _ textLayoutManager: NSTextLayoutManager,
+        textLayoutFragmentFor location: NSTextLocation,
+        in textElement: NSTextElement
+    ) -> NSTextLayoutFragment {
+        return CodeBlockLayoutFragment(
+            textElement: textElement,
+            range: textElement.elementRange
+        )
     }
 
     private func updateActiveFormats() {
@@ -249,10 +281,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func didEdit() {
-        if !editor.isPreviewing, !isDirty {
+        // Fired only on real content changes — preview toggles post a
+        // distinct notification handled by `didTogglePreview()`.
+        if !isDirty {
             isDirty = true
             updateTitle()
         }
+        bottomBar.update(for: editor.string, documentName: displayName)
+        updateActiveFormats()
+    }
+
+    private func didTogglePreview() {
         bottomBar.setPreviewing(editor.isPreviewing)
         let sourceText = editor.isPreviewing
             ? (editor.markdownSource ?? editor.string)

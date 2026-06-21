@@ -27,6 +27,21 @@ if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?(-[A-Za-z0-9]+
 fi
 : "${NOTES:=Reader $VERSION}"
 
+# Validate VERSION at entry so weird values can't drift into PlistBuddy
+# commands, file names, or the appcast XML downstream.
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?([+-][A-Za-z0-9.-]+)?$ ]]; then
+    echo "version must look like 1.2 or 1.2.3 (got: $VERSION)"
+    exit 1
+fi
+
+# XML-escape for element content and attribute values. CDATA bodies use a
+# different escape (only `]]>` is special — applied separately below).
+xml_escape() {
+    printf %s "$1" \
+        | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+              -e 's/"/\&quot;/g' -e "s/'/\\&apos;/g"
+}
+
 REPO="thejefflarson/reader"
 APP_NAME="Reader"
 BUILD_DIR="$(pwd)/build"
@@ -45,7 +60,12 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Conte
 cp "$BIN_DIR/Reader" "$APP_DIR/Contents/MacOS/Reader"
 chmod +x "$APP_DIR/Contents/MacOS/Reader"
 cp -R "$BIN_DIR/Sparkle.framework" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+# `swift build` doesn't know we're producing a .app bundle; add an rpath
+# pointing at Contents/Frameworks so dyld can resolve `@rpath/Sparkle…`
+# at launch.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_DIR/Contents/MacOS/Reader" 2>/dev/null || true
 cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
+install -m 0755 scripts/reader "$APP_DIR/Contents/Resources/reader"
 
 # Patch Info.plist with the version at release time, then copy in.
 /usr/libexec/PlistBuddy \
@@ -78,22 +98,32 @@ fi
 DATE="$(/bin/date -u +"%a, %d %b %Y %H:%M:%S +0000")"
 DOWNLOAD_URL="https://github.com/$REPO/releases/download/v$VERSION/$ZIP_NAME"
 
-# Escape any ]]> sequences in NOTES so they cannot close the CDATA section
-# early and inject arbitrary XML into the appcast served to all users.
-NOTES_SAFE="${NOTES//]]>/]]]]><![CDATA[>}"
+# CDATA-escape `]]>` so notes containing it can't terminate the CDATA
+# section and inject arbitrary XML into the appcast feed. Inside CDATA the
+# other XML specials (`&`, `<`, `>`) are literal, so `]]>` is the only escape.
+NOTES_ESCAPED="${NOTES//]]>/]]]]><![CDATA[>}"
+
+# Defense in depth — every value below should already be from a trusted source
+# (VERSION is regex-validated, LENGTH is digits, ED_SIGNATURE is base64) but
+# round-trip the strings through XML escaping so a future caller can't break
+# the appcast by interpolating an unexpected character.
+VERSION_X="$(xml_escape "$VERSION")"
+URL_X="$(xml_escape "$DOWNLOAD_URL")"
+SIG_X="$(xml_escape "$ED_SIGNATURE")"
+LENGTH_X="$(xml_escape "$LENGTH")"
 
 ITEM="        <item>
-            <title>Version $VERSION</title>
+            <title>Version $VERSION_X</title>
             <pubDate>$DATE</pubDate>
-            <sparkle:version>$VERSION</sparkle:version>
-            <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+            <sparkle:version>$VERSION_X</sparkle:version>
+            <sparkle:shortVersionString>$VERSION_X</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[$NOTES_SAFE]]></description>
+            <description><![CDATA[$NOTES_ESCAPED]]></description>
             <enclosure
-                url=\"$DOWNLOAD_URL\"
-                length=\"$LENGTH\"
+                url=\"$URL_X\"
+                length=\"$LENGTH_X\"
                 type=\"application/octet-stream\"
-                sparkle:edSignature=\"$ED_SIGNATURE\" />
+                sparkle:edSignature=\"$SIG_X\" />
         </item>"
 
 if [ ! -f "$APPCAST" ]; then
