@@ -45,13 +45,18 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.3.0</string>
+	<string>1.3.1</string>
 	<key>CFBundleVersion</key>
-	<string>1.3.0</string>
+	<string>1.3.1</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+	</dict>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>
@@ -64,19 +69,10 @@
 	<true/>
 	<key>SUEnableInstallerLauncherService</key>
 	<true/>
-	<!-- Feed must be hosted outside the source repo; see supply-chain finding. -->
 	<key>SUFeedURL</key>
 	<string>https://thejefflarson.github.io/reader/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>zBk/+O7F6ZvuCdEM7p7FQ3VHdkOFkRbJhMbZGRjqP3U=</string>
-	<!-- Explicitly enforce HTTPS-only for all URLSession connections so future
-	     code cannot accidentally use cleartext HTTP. This matches the system
-	     default on modern macOS but makes the policy explicit and auditable. -->
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<false/>
-	</dict>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
